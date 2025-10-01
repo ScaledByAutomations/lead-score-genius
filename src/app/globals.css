@@ -1,8 +1,41 @@
 @import "tailwindcss";
 
 :root {
-  --background: #ffffff;
-  --foreground: #171717;
+  color-scheme: light;
+  --background: #f8fafc;
+  --foreground: #0f172a;
+  --surface: #ffffff;
+  --surface-subtle: #f1f5f9;
+  --surface-elevated: #ffffff;
+  --border: #d0d5dd;
+  --border-muted: #e2e8f0;
+  --muted: #475467;
+  --muted-strong: #1f2937;
+  --accent: #1d4ed8;
+  --accent-hover: #1e40af;
+  --accent-contrast: #ffffff;
+  --success: #047857;
+  --warning: #b45309;
+  --error: #dc2626;
+}
+
+.dark {
+  color-scheme: dark;
+  --background: #0b1120;
+  --foreground: #e2e8f0;
+  --surface: #111c33;
+  --surface-subtle: #15223d;
+  --surface-elevated: #1f2a45;
+  --border: #1f2e4a;
+  --border-muted: #243556;
+  --muted: #a5b4d6;
+  --muted-strong: #f1f5ff;
+  --accent: #60a5fa;
+  --accent-hover: #93c5fd;
+  --accent-contrast: #061022;
+  --success: #34d399;
+  --warning: #fbbf24;
+  --error: #f87171;
 }
 
 @theme inline {
@@ -12,15 +45,50 @@
   --font-mono: var(--font-geist-mono);
 }
 
-@media (prefers-color-scheme: dark) {
-  :root {
-    --background: #0a0a0a;
-    --foreground: #ededed;
-  }
-}
-
 body {
   background: var(--background);
   color: var(--foreground);
-  font-family: Arial, Helvetica, sans-serif;
+  font-family: var(--font-geist-sans), system-ui, -apple-system, "Segoe UI", sans-serif;
+  transition: background-color 150ms ease, color 150ms ease;
+}
+
+a {
+  color: var(--accent);
+}
+
+a:hover {
+  color: var(--accent-hover);
+}
+
+.dark .bg-white,
+.dark .bg-slate-100,
+.dark .bg-slate-200,
+.dark .bg-slate-700,
+.dark .bg-slate-800,
+.dark .bg-slate-900 {
+  background-color: var(--surface) !important;
+}
+
+.dark .bg-slate-100,
+.dark .bg-slate-200 {
+  background-color: var(--surface-subtle) !important;
+}
+
+.dark .border-slate-200,
+.dark .border-slate-300,
+.dark .border-slate-700,
+.dark .border-slate-800 {
+  border-color: var(--border) !important;
+}
+
+.dark .text-slate-900,
+.dark .text-slate-800 {
+  color: var(--foreground) !important;
+}
+
+.dark .text-slate-700,
+.dark .text-slate-600,
+.dark .text-slate-500,
+.dark .text-slate-400 {
+  color: var(--muted) !important;
 }
