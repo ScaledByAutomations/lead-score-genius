@@ -30,7 +30,7 @@ export async function resolveWithHeadless(query: string, providedUrl?: string): 
     const cacheDir = process.env.PUPPETEER_CACHE_DIR || "/tmp/puppeteer-cache";
     await mkdir(cacheDir, { recursive: true }).catch(() => {});
 
-    const executablePath = await chromium.executablePath({ cacheDir });
+    const executablePath = await chromium.executablePath(cacheDir);
 
     const launchOptions = {
       headless: chromium.headless,
