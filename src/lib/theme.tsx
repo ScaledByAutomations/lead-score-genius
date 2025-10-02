@@ -14,22 +14,9 @@ const STORAGE_KEY = "lead-score-genius-theme";
 
 const ThemeContext = createContext<ThemeContextValue | undefined>(undefined);
 
-function getPreferredTheme(): Theme {
-  if (typeof window === "undefined") {
-    return "light";
-  }
-
-  const stored = window.localStorage.getItem(STORAGE_KEY) as Theme | null;
-  if (stored === "light" || stored === "dark") {
-    return stored;
-  }
-
-  const prefersDark = window.matchMedia?.("(prefers-color-scheme: dark)")?.matches ?? false;
-  return prefersDark ? "dark" : "light";
-}
-
 export function ThemeProvider({ children }: { children: React.ReactNode }) {
-  const [theme, setTheme] = useState<Theme>(() => getPreferredTheme());
+  const [theme, setThemeState] = useState<Theme>("light");
+  const [resolved, setResolved] = useState(false);
 
   useEffect(() => {
     if (typeof window === "undefined") {
@@ -38,41 +25,49 @@ export function ThemeProvider({ children }: { children: React.ReactNode }) {
     const stored = window.localStorage.getItem(STORAGE_KEY) as Theme | null;
     const fallback = window.matchMedia?.("(prefers-color-scheme: dark)")?.matches ? "dark" : "light";
     const nextTheme = stored === "light" || stored === "dark" ? stored : fallback;
-    if (nextTheme !== theme) {
-      setTheme(nextTheme);
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+    setThemeState(nextTheme);
+    setResolved(true);
   }, []);
 
   useEffect(() => {
+    if (!resolved || typeof window === "undefined") {
+      return;
+    }
     const root = document.documentElement;
     root.classList.toggle("dark", theme === "dark");
     window.localStorage.setItem(STORAGE_KEY, theme);
-  }, [theme]);
+  }, [theme, resolved]);
 
   useEffect(() => {
-    const handler = (event: MediaQueryListEvent) => {
-      setTheme(event.matches ? "dark" : "light");
-    };
-
+    if (!resolved || typeof window === "undefined") {
+      return;
+    }
     const media = window.matchMedia?.("(prefers-color-scheme: dark)");
     if (!media) {
       return;
     }
+    const handler = (event: MediaQueryListEvent) => {
+      setThemeState(event.matches ? "dark" : "light");
+    };
     if (typeof media.addEventListener === "function") {
       media.addEventListener("change", handler);
       return () => media.removeEventListener("change", handler);
     }
-    // Fallback for older browsers
     media.addListener?.(handler);
     return () => media.removeListener?.(handler);
-  }, []);
+  }, [resolved]);
 
   const value = useMemo<ThemeContextValue>(
     () => ({
       theme,
-      setTheme,
-      toggleTheme: () => setTheme((prev) => (prev === "dark" ? "light" : "dark"))
+      setTheme: (next: Theme) => {
+        setResolved(true);
+        setThemeState(next);
+      },
+      toggleTheme: () => {
+        setResolved(true);
+        setThemeState((prev) => (prev === "dark" ? "light" : "dark"));
+      }
     }),
     [theme]
   );

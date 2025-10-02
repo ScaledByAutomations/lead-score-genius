@@ -23,7 +23,9 @@ type JobSnapshot = {
   results: LeadScoreApiResponse["leads"];
 };
 
-const ASYNC_JOB_THRESHOLD = 150;
+const asyncThresholdFromEnv = Number(process.env.NEXT_PUBLIC_ASYNC_JOB_THRESHOLD);
+// Default to synchronous processing because the in-memory queue is unreliable in serverless runtimes.
+const ASYNC_JOB_THRESHOLD = Number.isFinite(asyncThresholdFromEnv) ? asyncThresholdFromEnv : Number.POSITIVE_INFINITY;
 
 const FIELD_ALIASES = {
   id: ["id", "lead_id", "record_id", "crm_id"],
