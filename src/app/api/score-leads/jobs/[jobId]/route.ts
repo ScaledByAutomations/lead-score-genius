@@ -1,6 +1,6 @@
-import { NextResponse } from "next/server";
+import { NextResponse, after } from "next/server";
 
-import { getJob } from "@/lib/jobQueue";
+import { getJob, triggerLeadJob } from "@/lib/jobQueue";
 
 type Context = {
   params: {
@@ -17,6 +17,10 @@ export async function GET(
 
   if (!job) {
     return NextResponse.json({ error: "Job not found" }, { status: 404 });
+  }
+
+  if (job.status !== "completed" && job.status !== "failed" && job.processed < job.total) {
+    after(() => triggerLeadJob(job.id));
   }
 
   return NextResponse.json({ job });

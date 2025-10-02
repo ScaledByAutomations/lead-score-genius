@@ -5,6 +5,8 @@ import type { LeadInput, LeadScoreApiResponse } from "@/lib/types";
 import { getSupabaseAdminClient } from "@/lib/supabase";
 import { scoreLeads, type ScoreLeadOptions } from "@/lib/scoreLeads";
 
+const STALE_JOB_THRESHOLD_MS = Number(process.env.LEAD_JOB_STALE_MS ?? "60000");
+
 type JobStatus = "pending" | "processing" | "completed" | "failed";
 
 type JobMetadata = {
@@ -39,6 +41,72 @@ type LeadJobItemRow = {
   created_at: string;
   updated_at: string;
 };
+
+function isJobStale(job: LeadJobRow): boolean {
+  const updatedAt = new Date(job.updated_at).getTime();
+  return Number.isFinite(updatedAt) && Date.now() - updatedAt > STALE_JOB_THRESHOLD_MS;
+}
+
+async function claimLeadJob(
+  client: SupabaseClient,
+  job: LeadJobRow
+): Promise<{ job: LeadJobRow; items: LeadJobItemRow[] } | null> {
+  if (job.status === "completed" || job.status === "failed") {
+    return null;
+  }
+
+  if (job.status === "queued") {
+    const { data: claimed, error: claimError } = await client
+      .from("lead_jobs")
+      .update({ status: "processing" })
+      .eq("id", job.id)
+      .eq("status", "queued")
+      .select("*")
+      .maybeSingle<LeadJobRow>();
+
+    if (claimError) {
+      console.error("Failed to claim queued job", { jobId: job.id }, claimError);
+      return null;
+    }
+
+    if (!claimed) {
+      return null;
+    }
+
+    const refreshed = await loadJob(client, job.id);
+    return refreshed;
+  }
+
+  if (job.status === "processing") {
+    if (!isJobStale(job)) {
+      return null;
+    }
+
+    const staleCutoff = new Date(Date.now() - STALE_JOB_THRESHOLD_MS).toISOString();
+    const { data: reclaimed, error: reclaimError } = await client
+      .from("lead_jobs")
+      .update({ status: "processing", updated_at: new Date().toISOString() })
+      .eq("id", job.id)
+      .eq("status", "processing")
+      .lte("updated_at", staleCutoff)
+      .select("*")
+      .maybeSingle<LeadJobRow>();
+
+    if (reclaimError) {
+      console.error("Failed to reclaim stale job", { jobId: job.id }, reclaimError);
+      return null;
+    }
+
+    if (!reclaimed) {
+      return null;
+    }
+
+    const refreshed = await loadJob(client, job.id);
+    return refreshed;
+  }
+
+  return null;
+}
 
 export type JobSnapshot = {
   id: string;
@@ -134,39 +202,16 @@ async function processLeadJob(jobId: string) {
     return;
   }
 
-  const { job: initialJob, items } = payload;
-  let job = initialJob;
+  let { job, items } = payload;
 
-  if (job.status === "completed" || job.status === "failed") {
+  const claimed = await claimLeadJob(client, job);
+  if (!claimed) {
     return;
   }
 
-  if (job.status === "queued") {
-    const { data: claimed, error: claimError } = await client
-      .from("lead_jobs")
-      .update({ status: "processing" })
-      .eq("id", jobId)
-      .eq("status", "queued")
-      .select("*")
-      .maybeSingle<LeadJobRow>();
-
-    if (claimError) {
-      console.error("Failed to claim job", { jobId }, claimError);
-      return;
-    }
-
-    if (!claimed) {
-      return;
-    }
-
-    job = claimed;
-  } else if (job.status !== "processing") {
-    // Another worker already owns processing for this job.
-    return;
-  }
+  ({ job, items } = claimed);
 
   const pendingItems = items.filter((item) => !item.result);
-
 
   if (pendingItems.length === 0) {
     const metadata = { ...(job.metadata ?? {}) } as JobMetadata;
@@ -359,10 +404,6 @@ export async function enqueueLeadJob(
     throw new Error(itemsError.message ?? "Failed to store job items");
   }
 
-  void processLeadJob(job.id).catch((error) => {
-    console.error("Background lead job failed", { jobId: job.id }, error);
-  });
-
   const snapshot = await getJob(job.id);
   if (!snapshot) {
     throw new Error("Failed to retrieve job after enqueueing");
@@ -380,12 +421,6 @@ export async function getJob(jobId: string): Promise<JobSnapshot | null> {
   const payload = await loadJob(client, jobId);
   if (!payload) {
     return null;
-  }
-
-  if (payload.job.status === "queued") {
-    void processLeadJob(jobId).catch((error) => {
-      console.error("Failed to start job processing from getter", { jobId }, error);
-    });
   }
 
   return toSnapshot(payload.job, payload.items);
@@ -420,4 +455,10 @@ export async function listJobs(): Promise<JobSnapshot[]> {
   }
 
   return snapshots;
+}
+
+export function triggerLeadJob(jobId: string) {
+  processLeadJob(jobId).catch((error) => {
+    console.error("Background lead job failed", { jobId }, error);
+  });
 }

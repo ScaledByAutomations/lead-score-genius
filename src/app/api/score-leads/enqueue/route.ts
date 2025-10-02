@@ -1,7 +1,7 @@
-import { NextResponse } from "next/server";
+import { NextResponse, after } from "next/server";
 
 import type { LeadInput } from "@/lib/types";
-import { enqueueLeadJob } from "@/lib/jobQueue";
+import { enqueueLeadJob, triggerLeadJob } from "@/lib/jobQueue";
 
 export async function POST(request: Request) {
   try {
@@ -21,6 +21,8 @@ export async function POST(request: Request) {
       saveToSupabase: payload?.options?.saveToSupabase === true,
       userId: authUserId
     });
+
+    after(() => triggerLeadJob(job.id));
 
     return NextResponse.json({ job });
   } catch (error) {
