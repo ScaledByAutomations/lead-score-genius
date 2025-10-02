@@ -9,6 +9,7 @@
     "lint": "eslint"
   },
   "dependencies": {
+    "@sparticuz/chromium": "^127.0.0",
     "@supabase/supabase-js": "^2.48.0",
     "next": "15.5.4",
     "puppeteer": "^23.4.0",
