@@ -1,5 +1,7 @@
 import { mkdir } from "fs/promises";
 
+import chromium from "@sparticuz/chromium";
+
 import { getEnv } from "../env";
 
 export type HeadlessExtraction = {
@@ -16,30 +18,6 @@ const delay = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
 const isPlaceUrl = (url?: string | null) => !!url && url.includes("/maps/place/");
 
-async function ensureChromiumExecutable(puppeteer: typeof import("puppeteer")) {
-  const cacheDir = process.env.PUPPETEER_CACHE_DIR || "/tmp/puppeteer-cache";
-  await mkdir(cacheDir, { recursive: true }).catch(() => {
-    // Directory may already exist or be read-only; ignore errors so long as Puppeteer can proceed.
-  });
-
-  const fetcher = puppeteer.createBrowserFetcher({ path: cacheDir });
-  const revision =
-    // `_preferredRevision` is maintained by Puppeteer to indicate the bundled Chromium build.
-    (puppeteer as unknown as { _preferredRevision?: string })._preferredRevision ??
-    puppeteer.defaultBrowserRevision?.();
-
-  if (!revision) {
-    throw new Error("Unable to determine Puppeteer Chromium revision");
-  }
-
-  let info = fetcher.revisionInfo(revision);
-  if (!info.local) {
-    info = await fetcher.download(revision);
-  }
-
-  return info.executablePath;
-}
-
 export async function resolveWithHeadless(query: string, providedUrl?: string): Promise<HeadlessExtraction | null> {
   const { MAPS_HEADLESS, MAPS_TIMEOUT_MS } = getEnv();
 
@@ -49,7 +27,9 @@ export async function resolveWithHeadless(query: string, providedUrl?: string): 
 
   try {
     const puppeteer = await import("puppeteer");
-    const executablePath = await ensureChromiumExecutable(puppeteer);
+    const cacheDir = process.env.PUPPETEER_CACHE_DIR || "/tmp/puppeteer-cache";
+    await mkdir(cacheDir, { recursive: true }).catch(() => {});
+    const executablePath = (await chromium.executablePath(cacheDir)) ?? undefined;
     const browser = await puppeteer.launch({
       headless: true,
       executablePath,
