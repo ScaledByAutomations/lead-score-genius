@@ -16,7 +16,7 @@ export async function POST(request: Request) {
       ? payload.user_id.trim()
       : null;
 
-    const job = enqueueLeadJob(leads, {
+    const job = await enqueueLeadJob(leads, {
       useCleaner: payload?.options?.useCleaner !== false,
       saveToSupabase: payload?.options?.saveToSupabase === true,
       userId: authUserId

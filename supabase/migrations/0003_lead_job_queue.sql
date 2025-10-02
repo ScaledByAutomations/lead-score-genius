@@ -38,13 +38,31 @@ begin
 end;
 $$ language plpgsql;
 
-create trigger lead_jobs_set_updated_at
-before update on lead_jobs
-for each row execute function public.set_updated_at();
+do $$
+begin
+  if not exists (
+    select 1 from pg_trigger
+    where tgname = 'lead_jobs_set_updated_at'
+  ) then
+    create trigger lead_jobs_set_updated_at
+    before update on lead_jobs
+    for each row execute function public.set_updated_at();
+  end if;
+end;
+$$;
 
-create trigger lead_job_items_set_updated_at
-before update on lead_job_items
-for each row execute function public.set_updated_at();
+do $$
+begin
+  if not exists (
+    select 1 from pg_trigger
+    where tgname = 'lead_job_items_set_updated_at'
+  ) then
+    create trigger lead_job_items_set_updated_at
+    before update on lead_job_items
+    for each row execute function public.set_updated_at();
+  end if;
+end;
+$$;
 
 -- Ensure RLS is enabled so auth context applies when accessed from edge functions/routes
 alter table lead_jobs enable row level security;

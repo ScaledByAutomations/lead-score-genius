@@ -1,28 +1,43 @@
-import { randomUUID } from "crypto";
+
+import type { SupabaseClient } from "@supabase/supabase-js";
 
 import type { LeadInput, LeadScoreApiResponse } from "@/lib/types";
+import { getSupabaseAdminClient } from "@/lib/supabase";
 import { scoreLeads, type ScoreLeadOptions } from "@/lib/scoreLeads";
 
 type JobStatus = "pending" | "processing" | "completed" | "failed";
 
-type IndexedResult = {
-  index: number;
-  item: LeadScoreApiResponse["leads"][number];
+type JobMetadata = {
+  options?: {
+    useCleaner: boolean;
+    saveToSupabase: boolean;
+    maxConcurrency?: number;
+  };
+  supabase?: LeadScoreApiResponse["supabase"];
 };
 
-type InternalJob = {
+type LeadJobRow = {
   id: string;
-  status: JobStatus;
+  user_id: string | null;
+  status: string;
   total: number;
   processed: number;
-  createdAt: number;
-  updatedAt: number;
-  error?: string;
-  supabase: LeadScoreApiResponse["supabase"];
-  resultMap: Map<string, IndexedResult>;
-  orderMap: Map<string, number>;
-  leads: LeadInput[];
-  options: Omit<ScoreLeadOptions, "onProgress">;
+  error: string | null;
+  metadata: JobMetadata | null;
+  created_at: string;
+  updated_at: string;
+};
+
+type LeadJobItemRow = {
+  job_id: string;
+  item_index: number;
+  payload: LeadInput;
+  status: string;
+  error: string | null;
+  result: LeadScoreApiResponse["leads"][number] | null;
+  processed_at: string | null;
+  created_at: string;
+  updated_at: string;
 };
 
 export type JobSnapshot = {
@@ -37,119 +52,375 @@ export type JobSnapshot = {
   results: LeadScoreApiResponse["leads"];
 };
 
-const jobs = new Map<string, InternalJob>();
-const queue: string[] = [];
-let processing = false;
+function mapStatus(status: string): JobStatus {
+  switch (status) {
+    case "queued":
+      return "pending";
+    case "processing":
+      return "processing";
+    case "completed":
+      return "completed";
+    case "failed":
+      return "failed";
+    default:
+      return "pending";
+  }
+}
 
-function toSnapshot(job: InternalJob): JobSnapshot {
-  const results = Array.from(job.resultMap.values())
-    .sort((a, b) => a.index - b.index)
-    .map((entry) => entry.item);
+function toSnapshot(job: LeadJobRow, items: LeadJobItemRow[]): JobSnapshot {
+  const results = items
+    .filter((item) => item.result)
+    .sort((a, b) => a.item_index - b.item_index)
+    .map((item) => item.result as LeadScoreApiResponse["leads"][number]);
+
+  const supabaseResult = (job.metadata?.supabase ?? null) as JobSnapshot["supabase"];
 
   return {
     id: job.id,
-    status: job.status,
+    status: mapStatus(job.status),
     total: job.total,
     processed: job.processed,
-    createdAt: job.createdAt,
-    updatedAt: job.updatedAt,
-    error: job.error,
-    supabase: job.supabase,
+    createdAt: new Date(job.created_at).getTime(),
+    updatedAt: new Date(job.updated_at).getTime(),
+    error: job.error ?? undefined,
+    supabase: supabaseResult,
     results
   };
 }
 
-async function runQueue() {
-  if (processing) {
-    return;
+async function loadJob(
+  client: SupabaseClient,
+  jobId: string
+): Promise<{ job: LeadJobRow; items: LeadJobItemRow[] } | null> {
+  const { data: job, error: jobError } = await client
+    .from("lead_jobs")
+    .select("*")
+    .eq("id", jobId)
+    .maybeSingle<LeadJobRow>();
+
+  if (jobError) {
+    console.error("Failed to load job", { jobId }, jobError);
+    return null;
   }
 
-  const nextId = queue.shift();
-  if (!nextId) {
-    return;
-  }
-
-  const job = jobs.get(nextId);
-  if (!job) {
-    return runQueue();
-  }
-
-  processing = true;
-
-  try {
-    job.status = "processing";
-    job.updatedAt = Date.now();
-
-    const result = await scoreLeads(job.leads, {
-      ...job.options,
-      onProgress: ({ lead, result }) => {
-        job.processed += 1;
-        job.updatedAt = Date.now();
-        const index = job.orderMap.get(lead.lead_id) ?? job.resultMap.size;
-        job.resultMap.set(lead.lead_id, { index, item: result });
-      }
-    });
-
-    job.supabase = result.supabase ?? null;
-    job.resultMap.clear();
-    result.leads.forEach((item, idx) => {
-      const index = job.orderMap.get(item.lead.lead_id) ?? idx;
-      job.resultMap.set(item.lead.lead_id, { index, item });
-    });
-    job.processed = job.total;
-    job.status = "completed";
-    job.updatedAt = Date.now();
-    job.leads = [];
-  } catch (error) {
-    job.status = "failed";
-    job.error = error instanceof Error ? error.message : String(error);
-    job.updatedAt = Date.now();
-  } finally {
-    processing = false;
-    runQueue().catch((queueError) => {
-      console.error("Job queue failed", queueError);
-    });
-  }
-}
-
-export function enqueueLeadJob(
-  leads: LeadInput[],
-  options: Omit<ScoreLeadOptions, "onProgress"> = {}
-): JobSnapshot {
-  const id = randomUUID();
-  const now = Date.now();
-  const job: InternalJob = {
-    id,
-    status: "pending",
-    total: leads.length,
-    processed: 0,
-    createdAt: now,
-    updatedAt: now,
-    error: undefined,
-    supabase: null,
-    resultMap: new Map(),
-    orderMap: new Map(leads.map((lead, index) => [lead.lead_id, index])),
-    leads,
-    options
-  };
-
-  jobs.set(id, job);
-  queue.push(id);
-  runQueue().catch((error) => {
-    console.error("Failed to process job queue", error);
-  });
-
-  return toSnapshot(job);
-}
-
-export function getJob(jobId: string): JobSnapshot | null {
-  const job = jobs.get(jobId);
   if (!job) {
     return null;
   }
-  return toSnapshot(job);
+
+  const { data: items, error: itemsError } = await client
+    .from("lead_job_items")
+    .select("*")
+    .eq("job_id", jobId)
+    .order("item_index", { ascending: true })
+    .returns<LeadJobItemRow[]>();
+
+  if (itemsError) {
+    console.error("Failed to load job items", { jobId }, itemsError);
+    return null;
+  }
+
+  return { job, items: items ?? [] };
 }
 
-export function listJobs(): JobSnapshot[] {
-  return Array.from(jobs.values()).map(toSnapshot);
+async function processLeadJob(jobId: string) {
+  const client = getSupabaseAdminClient();
+  if (!client) {
+    console.error("Supabase client not configured; cannot process job", { jobId });
+    return;
+  }
+
+  const payload = await loadJob(client, jobId);
+  if (!payload) {
+    return;
+  }
+
+  const { job: initialJob, items } = payload;
+  let job = initialJob;
+  let claimedByThisInvocation = false;
+
+  if (job.status === "completed" || job.status === "failed") {
+    return;
+  }
+
+  if (job.status === "queued") {
+    const { data: claimed, error: claimError } = await client
+      .from("lead_jobs")
+      .update({ status: "processing" })
+      .eq("id", jobId)
+      .eq("status", "queued")
+      .select<LeadJobRow>();
+
+    if (claimError) {
+      console.error("Failed to claim job", { jobId }, claimError);
+      return;
+    }
+
+    if (!claimed || claimed.length === 0) {
+      return;
+    }
+
+    job = claimed[0];
+    claimedByThisInvocation = true;
+  }
+
+  if (!claimedByThisInvocation) {
+    // Another worker already owns processing for this job.
+    return;
+  }
+
+  const pendingItems = items.filter((item) => !item.result);
+
+
+  if (pendingItems.length === 0) {
+    const metadata = { ...(job.metadata ?? {}) } as JobMetadata;
+    const processedComplete = items.length;
+    const { error: completeError } = await client
+      .from("lead_jobs")
+      .update({ status: "completed", processed: processedComplete, metadata })
+      .eq("id", jobId);
+
+    if (completeError) {
+      console.error("Failed to finalize job", { jobId }, completeError);
+    }
+
+    return;
+  }
+
+  const processedSet = items.filter((item) => item.result).length;
+  let processedCount = Math.max(job.processed ?? 0, processedSet);
+
+  const indexQueues = new Map<string, number[]>();
+  const itemsByIndex = new Map<number, LeadJobItemRow>();
+
+  for (const item of items) {
+    itemsByIndex.set(item.item_index, item);
+    if (!item.result) {
+      const key = item.payload.lead_id;
+      const queue = indexQueues.get(key) ?? [];
+      queue.push(item.item_index);
+      indexQueues.set(key, queue);
+    }
+  }
+
+  const metadata = { ...(job.metadata ?? {}) } as JobMetadata;
+  const options = metadata.options ?? {
+    useCleaner: true,
+    saveToSupabase: false
+  };
+
+  const leadsToProcess = pendingItems.map((item) => item.payload);
+
+  try {
+    const result = await scoreLeads(leadsToProcess, {
+      useCleaner: options.useCleaner,
+      saveToSupabase: options.saveToSupabase,
+      userId: job.user_id,
+      maxConcurrency: options.maxConcurrency,
+      onProgress: async ({ lead, result: leadResult }) => {
+        const queue = indexQueues.get(lead.lead_id);
+        const itemIndex = queue?.shift();
+        if (queue && queue.length === 0) {
+          indexQueues.delete(lead.lead_id);
+        }
+
+        if (itemIndex === undefined) {
+          console.warn("No job item index found for lead", { jobId, leadId: lead.lead_id });
+          return;
+        }
+
+        const now = new Date().toISOString();
+        const sanitizedResult = {
+          ...leadResult,
+          lead: { ...leadResult.lead }
+        } as LeadScoreApiResponse["leads"][number];
+
+        const { error: itemError } = await client
+          .from("lead_job_items")
+          .update({
+            status: "completed",
+            result: sanitizedResult,
+            error: null,
+            processed_at: now
+          })
+          .eq("job_id", jobId)
+          .eq("item_index", itemIndex);
+
+        if (itemError) {
+          console.error("Failed to update job item", { jobId, itemIndex }, itemError);
+        }
+
+        processedCount += 1;
+
+        const { error: progressError } = await client
+          .from("lead_jobs")
+          .update({ processed: processedCount })
+          .eq("id", jobId);
+
+        if (progressError) {
+          console.error("Failed to update job progress", { jobId }, progressError);
+        }
+
+        const currentItem = itemsByIndex.get(itemIndex);
+        if (currentItem) {
+          currentItem.status = "completed";
+          currentItem.result = sanitizedResult;
+          currentItem.error = null;
+          currentItem.processed_at = now;
+        }
+      }
+    });
+
+    metadata.options = {
+      useCleaner: options.useCleaner,
+      saveToSupabase: options.saveToSupabase,
+      maxConcurrency: options.maxConcurrency
+    };
+    metadata.supabase = result.supabase ?? null;
+
+    const { error: completeError } = await client
+      .from("lead_jobs")
+      .update({
+        status: "completed",
+        processed: itemsByIndex.size,
+        error: null,
+        metadata
+      })
+      .eq("id", jobId);
+
+    if (completeError) {
+      console.error("Failed to mark job completed", { jobId }, completeError);
+    }
+  } catch (error) {
+    console.error("Lead job processing failed", { jobId }, error);
+
+    const errorMessage = error instanceof Error ? error.message : String(error);
+    const { error: jobError } = await client
+      .from("lead_jobs")
+      .update({ status: "failed", error: errorMessage, processed: processedCount })
+      .eq("id", jobId);
+
+    if (jobError) {
+      console.error("Failed to mark job failed", { jobId }, jobError);
+    }
+
+    const { error: remainingError } = await client
+      .from("lead_job_items")
+      .update({ status: "failed", error: errorMessage })
+      .eq("job_id", jobId)
+      .in("status", ["queued", "processing"]);
+
+    if (remainingError) {
+      console.error("Failed to update remaining job items", { jobId }, remainingError);
+    }
+  }
+}
+
+export async function enqueueLeadJob(
+  leads: LeadInput[],
+  options: Omit<ScoreLeadOptions, "onProgress"> = {}
+): Promise<JobSnapshot> {
+  const client = getSupabaseAdminClient();
+  if (!client) {
+    throw new Error("Supabase client not configured");
+  }
+
+  const metadata: JobMetadata = {
+    options: {
+      useCleaner: options.useCleaner !== false,
+      saveToSupabase: options.saveToSupabase === true,
+      maxConcurrency: options.maxConcurrency
+    }
+  };
+
+  const { data: job, error: jobError } = await client
+    .from("lead_jobs")
+    .insert({
+      user_id: options.userId ?? null,
+      status: "queued",
+      total: leads.length,
+      processed: 0,
+      metadata
+    })
+    .select<LeadJobRow>()
+    .single();
+
+  if (jobError || !job) {
+    console.error("Failed to enqueue lead job", jobError);
+    throw new Error(jobError?.message ?? "Failed to enqueue job");
+  }
+
+  const items = leads.map((lead, index) => ({
+    job_id: job.id,
+    item_index: index,
+    payload: lead,
+    status: "queued"
+  }));
+
+  const { error: itemsError } = await client.from("lead_job_items").insert(items);
+  if (itemsError) {
+    console.error("Failed to insert lead job items", { jobId: job.id }, itemsError);
+    throw new Error(itemsError.message ?? "Failed to store job items");
+  }
+
+  void processLeadJob(job.id).catch((error) => {
+    console.error("Background lead job failed", { jobId: job.id }, error);
+  });
+
+  const snapshot = await getJob(job.id);
+  if (!snapshot) {
+    throw new Error("Failed to retrieve job after enqueueing");
+  }
+  return snapshot;
+}
+
+export async function getJob(jobId: string): Promise<JobSnapshot | null> {
+  const client = getSupabaseAdminClient();
+  if (!client) {
+    console.error("Supabase client not configured");
+    return null;
+  }
+
+  const payload = await loadJob(client, jobId);
+  if (!payload) {
+    return null;
+  }
+
+  if (payload.job.status === "queued") {
+    void processLeadJob(jobId).catch((error) => {
+      console.error("Failed to start job processing from getter", { jobId }, error);
+    });
+  }
+
+  return toSnapshot(payload.job, payload.items);
+}
+
+export async function listJobs(): Promise<JobSnapshot[]> {
+  const client = getSupabaseAdminClient();
+  if (!client) {
+    console.error("Supabase client not configured");
+    return [];
+  }
+
+  const { data: jobs, error } = await client
+    .from("lead_jobs")
+    .select<LeadJobRow>("*")
+    .order("created_at", { ascending: false })
+    .limit(50);
+
+  if (error || !jobs) {
+    if (error) {
+      console.error("Failed to list jobs", error);
+    }
+    return [];
+  }
+
+  const snapshots: JobSnapshot[] = [];
+  for (const job of jobs) {
+    const payload = await loadJob(client, job.id);
+    if (payload) {
+      snapshots.push(toSnapshot(payload.job, payload.items));
+    }
+  }
+
+  return snapshots;
 }

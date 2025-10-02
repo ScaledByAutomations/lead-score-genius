@@ -17,7 +17,7 @@ export type ScoreLeadOptions = {
     total: number;
     lead: LeadInput;
     result: LeadScoreApiResponse["leads"][number];
-  }) => void;
+  }) => void | Promise<void>;
 };
 
 export async function scoreLeads(
@@ -81,12 +81,14 @@ export async function scoreLeads(
       } as LeadScoreApiResponse["leads"][number];
 
       batches.push(result);
-      options.onProgress?.({
-        processed: batches.length,
-        total: leads.length,
-        lead,
-        result
-      });
+      if (options.onProgress) {
+        await options.onProgress({
+          processed: batches.length,
+          total: leads.length,
+          lead,
+          result
+        });
+      }
     } catch (processingError) {
       console.error("Failed to score lead", { leadId: lead.lead_id }, processingError);
 
@@ -139,12 +141,14 @@ export async function scoreLeads(
       } as LeadScoreApiResponse["leads"][number];
 
       batches.push(result);
-      options.onProgress?.({
-        processed: batches.length,
-        total: leads.length,
-        lead,
-        result
-      });
+      if (options.onProgress) {
+        await options.onProgress({
+          processed: batches.length,
+          total: leads.length,
+          lead,
+          result
+        });
+      }
     }
   };
 
