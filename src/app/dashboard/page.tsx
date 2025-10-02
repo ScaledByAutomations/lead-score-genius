@@ -843,7 +843,7 @@ export default function DashboardPage() {
                     disabled={
                       saveState === "saving" ||
                       scoredLeads.length === 0 ||
-                      (activeJob !== null && activeJob.status !== "completed")
+                      Boolean(activeJob && activeJob.status !== "completed")
                     }
                     className={saveButtonClass}
                   >
