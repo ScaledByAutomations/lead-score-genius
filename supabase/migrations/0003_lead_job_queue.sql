@@ -51,13 +51,13 @@ alter table lead_jobs enable row level security;
 alter table lead_job_items enable row level security;
 
 -- Basic policies for owner access. Shared workers should authenticate with service role.
-create policy if not exists "Lead jobs are viewable by owner" on lead_jobs
+create policy "Lead jobs are viewable by owner" on lead_jobs
   for select using (auth.uid() = user_id);
 
-create policy if not exists "Lead jobs insertable by owner" on lead_jobs
+create policy "Lead jobs insertable by owner" on lead_jobs
   for insert with check (auth.uid() = user_id);
 
-create policy if not exists "Lead job items viewable by owner" on lead_job_items
+create policy "Lead job items viewable by owner" on lead_job_items
   for select using (
     exists (
       select 1 from lead_jobs
@@ -66,7 +66,7 @@ create policy if not exists "Lead job items viewable by owner" on lead_job_items
     )
   );
 
-create policy if not exists "Lead job items insertable by owner" on lead_job_items
+create policy "Lead job items insertable by owner" on lead_job_items
   for insert with check (
     exists (
       select 1 from lead_jobs
