@@ -47,38 +47,30 @@ export async function resolveWithHeadless(query: string, providedUrl?: string): 
     const puppeteer = await import("puppeteer");
     const baseExecutable = await getChromiumExecutable();
 
-    const launchWithExecutable = async () => {
-      const runtimePath = path.join(
+    let browser: Awaited<ReturnType<typeof puppeteer.launch>> | null = null;
+    let runtimePath: string | null = null;
+
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      runtimePath = path.join(
         cacheDirectory,
         `chromium-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2)}`
       );
 
-      await copyFile(baseExecutable, runtimePath);
+      await copyFile(baseExecutable, runtimePath).catch(() => {});
       await chmod(runtimePath, 0o755).catch(() => {});
 
-      let browserInstance = null;
-      try {
-        const launchOptions = {
-          headless: chromium.headless,
-          executablePath: runtimePath,
-          args: [...chromium.args, "--disable-dev-shm-usage"],
-          timeout: MAPS_TIMEOUT_MS
-        } satisfies Parameters<typeof puppeteer.launch>[0];
+      const launchOptions = {
+        headless: chromium.headless,
+        executablePath: runtimePath,
+        args: [...chromium.args, "--disable-dev-shm-usage"],
+        timeout: MAPS_TIMEOUT_MS
+      } satisfies Parameters<typeof puppeteer.launch>[0];
 
-        browserInstance = await puppeteer.launch(launchOptions);
-        return { browser: browserInstance, runtimePath };
-      } catch (launchError) {
-        await unlink(runtimePath).catch(() => {});
-        throw launchError;
-      }
-    };
-
-    let launchResult: { browser: Awaited<ReturnType<typeof puppeteer.launch>>; runtimePath: string } | null = null;
-    for (let attempt = 0; attempt < 3; attempt += 1) {
       try {
-        launchResult = await launchWithExecutable();
+        browser = await puppeteer.launch(launchOptions);
         break;
       } catch (error) {
+        await unlink(runtimePath).catch(() => {});
         const message = error instanceof Error ? error.message : String(error);
         if (message.includes("ETXTBSY") && attempt < 2) {
           await delay(200 * (attempt + 1));
@@ -88,11 +80,9 @@ export async function resolveWithHeadless(query: string, providedUrl?: string): 
       }
     }
 
-    if (!launchResult) {
+    if (!browser || !runtimePath) {
       throw new Error("Unable to launch headless browser");
     }
-
-    const { browser, runtimePath } = launchResult;
 
     try {
       const page = await browser.newPage();
@@ -363,7 +353,9 @@ export async function resolveWithHeadless(query: string, providedUrl?: string): 
       return null;
     } finally {
       await browser.close().catch(() => undefined);
-      await unlink(runtimePath).catch(() => {});
+      if (runtimePath) {
+        await unlink(runtimePath).catch(() => {});
+      }
     }
   } catch (error) {
     console.error("Headless Google Maps resolution failed", error);
