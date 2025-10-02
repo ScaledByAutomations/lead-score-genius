@@ -8,8 +8,11 @@ type Context = {
   };
 };
 
-export async function GET(_request: Request, context: Context) {
-  const jobId = context.params.jobId;
+export async function GET(
+  _request: Request,
+  { params }: { params: Promise<Context["params"]> }
+) {
+  const { jobId } = await params;
   const job = jobId ? getJob(jobId) : null;
 
   if (!job) {
