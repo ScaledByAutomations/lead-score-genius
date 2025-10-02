@@ -29,13 +29,34 @@ export async function resolveWithHeadless(query: string, providedUrl?: string): 
     const puppeteer = await import("puppeteer");
     const cacheDir = process.env.PUPPETEER_CACHE_DIR || "/tmp/puppeteer-cache";
     await mkdir(cacheDir, { recursive: true }).catch(() => {});
-    const executablePath = (await chromium.executablePath(cacheDir)) ?? undefined;
-    const browser = await puppeteer.launch({
-      headless: true,
-      executablePath,
-      args: ["--no-sandbox", "--disable-setuid-sandbox", "--disable-dev-shm-usage"],
+
+    const executablePath = await chromium.executablePath({ cacheDir });
+
+    const launchOptions = {
+      headless: chromium.headless,
+      executablePath: executablePath ?? undefined,
+      args: [...chromium.args, "--disable-dev-shm-usage"],
       timeout: MAPS_TIMEOUT_MS
-    });
+    } satisfies Parameters<typeof puppeteer.launch>[0];
+
+    let browser = null;
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      try {
+        browser = await puppeteer.launch(launchOptions);
+        break;
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        if (message.includes("ETXTBSY") && attempt < 2) {
+          await delay(200 * (attempt + 1));
+          continue;
+        }
+        throw error;
+      }
+    }
+
+    if (!browser) {
+      throw new Error("Unable to launch headless browser");
+    }
 
     try {
       const page = await browser.newPage();
