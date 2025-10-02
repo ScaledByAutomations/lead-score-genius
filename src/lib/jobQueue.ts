@@ -148,7 +148,7 @@ async function processLeadJob(jobId: string) {
       .update({ status: "processing" })
       .eq("id", jobId)
       .eq("status", "queued")
-      .select<LeadJobRow>();
+      .select<LeadJobRow>("*");
 
     if (claimError) {
       console.error("Failed to claim job", { jobId }, claimError);
@@ -341,7 +341,7 @@ export async function enqueueLeadJob(
       processed: 0,
       metadata
     })
-    .select<LeadJobRow>()
+    .select<LeadJobRow>("*")
     .single();
 
   if (jobError || !job) {
