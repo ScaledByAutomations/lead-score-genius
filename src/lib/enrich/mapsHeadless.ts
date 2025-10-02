@@ -1,4 +1,5 @@
-import { mkdir } from "fs/promises";
+import { chmod, copyFile, mkdir, unlink } from "fs/promises";
+import path from "path";
 
 import chromium from "@sparticuz/chromium";
 
@@ -16,6 +17,23 @@ export type HeadlessExtraction = {
 
 const delay = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
+const cacheDirectory = process.env.PUPPETEER_CACHE_DIR || "/tmp/puppeteer-cache";
+let chromiumExecutablePromise: Promise<string> | null = null;
+
+async function getChromiumExecutable(): Promise<string> {
+  if (!chromiumExecutablePromise) {
+    chromiumExecutablePromise = (async () => {
+      await mkdir(cacheDirectory, { recursive: true }).catch(() => {});
+      const executablePath = await chromium.executablePath();
+      if (!executablePath) {
+        throw new Error("Chromium executable path could not be resolved");
+      }
+      return executablePath;
+    })();
+  }
+  return chromiumExecutablePromise;
+}
+
 const isPlaceUrl = (url?: string | null) => !!url && url.includes("/maps/place/");
 
 export async function resolveWithHeadless(query: string, providedUrl?: string): Promise<HeadlessExtraction | null> {
@@ -27,22 +45,38 @@ export async function resolveWithHeadless(query: string, providedUrl?: string): 
 
   try {
     const puppeteer = await import("puppeteer");
-    const cacheDir = process.env.PUPPETEER_CACHE_DIR || "/tmp/puppeteer-cache";
-    await mkdir(cacheDir, { recursive: true }).catch(() => {});
+    const baseExecutable = await getChromiumExecutable();
 
-    const executablePath = await chromium.executablePath(cacheDir);
+    const launchWithExecutable = async () => {
+      const runtimePath = path.join(
+        cacheDirectory,
+        `chromium-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2)}`
+      );
 
-    const launchOptions = {
-      headless: chromium.headless,
-      executablePath: executablePath ?? undefined,
-      args: [...chromium.args, "--disable-dev-shm-usage"],
-      timeout: MAPS_TIMEOUT_MS
-    } satisfies Parameters<typeof puppeteer.launch>[0];
+      await copyFile(baseExecutable, runtimePath);
+      await chmod(runtimePath, 0o755).catch(() => {});
 
-    let browser = null;
+      let browserInstance = null;
+      try {
+        const launchOptions = {
+          headless: chromium.headless,
+          executablePath: runtimePath,
+          args: [...chromium.args, "--disable-dev-shm-usage"],
+          timeout: MAPS_TIMEOUT_MS
+        } satisfies Parameters<typeof puppeteer.launch>[0];
+
+        browserInstance = await puppeteer.launch(launchOptions);
+        return { browser: browserInstance, runtimePath };
+      } catch (launchError) {
+        await unlink(runtimePath).catch(() => {});
+        throw launchError;
+      }
+    };
+
+    let launchResult: { browser: Awaited<ReturnType<typeof puppeteer.launch>>; runtimePath: string } | null = null;
     for (let attempt = 0; attempt < 3; attempt += 1) {
       try {
-        browser = await puppeteer.launch(launchOptions);
+        launchResult = await launchWithExecutable();
         break;
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
@@ -54,9 +88,11 @@ export async function resolveWithHeadless(query: string, providedUrl?: string): 
       }
     }
 
-    if (!browser) {
+    if (!launchResult) {
       throw new Error("Unable to launch headless browser");
     }
+
+    const { browser, runtimePath } = launchResult;
 
     try {
       const page = await browser.newPage();
@@ -327,6 +363,7 @@ export async function resolveWithHeadless(query: string, providedUrl?: string): 
       return null;
     } finally {
       await browser.close().catch(() => undefined);
+      await unlink(runtimePath).catch(() => {});
     }
   } catch (error) {
     console.error("Headless Google Maps resolution failed", error);
