@@ -353,9 +353,31 @@ export async function getMapsSnapshot(
     }
   }
 
-  const jina = await fetchViaJina(query, identityTokens, uniqueRequiredTokens, minRequiredMatches);
+  const jina = await fetchViaJina(query, identityTokens, uniqueRequiredTokens, minRequiredMatches, "jina_text");
   if (jina) {
     return jina;
+  }
+
+  if (minRequiredMatches > 1) {
+    const relaxedRequiredTokens = uniqueRequiredTokens.slice(0, 1);
+    const relaxed = await fetchViaJina(
+      query,
+      identityTokens,
+      relaxedRequiredTokens,
+      relaxedRequiredTokens.length,
+      "jina_text_relaxed"
+    );
+    if (relaxed) {
+      return relaxed;
+    }
+  }
+
+  const looseTokens = queryTokens.length > 0 ? queryTokens : identityTokens;
+  if (looseTokens.length > 0) {
+    const loose = await fetchViaJina(query, looseTokens, [], 0, "jina_text_loose");
+    if (loose) {
+      return loose;
+    }
   }
 
   const fallbackUrl = headlessSnapshot?.sourceUrl ?? search?.url ?? resolvedProvidedUrl ?? providedUrl ?? "";
@@ -383,7 +405,8 @@ async function fetchViaJina(
   query: string,
   identityTokens: string[],
   requiredTokens: string[],
-  minRequiredMatches: number
+  minRequiredMatches: number,
+  methodLabel = "jina_text"
 ) {
   const jinaUrl = `https://r.jina.ai/https://maps.google.com/maps?q=${encodeURIComponent(query)}`;
   const matchTokens = identityTokens.length > 0 ? identityTokens : tokenizeQuery(query);
@@ -480,7 +503,7 @@ async function fetchViaJina(
       return null;
     }
 
-    return sanitizeSnapshot(jinaUrl, primary.rating, primary.reviewCount, "jina_text");
+    return sanitizeSnapshot(jinaUrl, primary.rating, primary.reviewCount, methodLabel);
   } catch (error) {
     console.error("Jina fallback failed", error);
     return null;
