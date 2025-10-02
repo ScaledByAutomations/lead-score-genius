@@ -24,7 +24,7 @@ export async function resolveWithHeadless(query: string, providedUrl?: string): 
   try {
     const puppeteer = await import("puppeteer");
     const browser = await puppeteer.launch({
-      headless: "new",
+      headless: true,
       args: ["--no-sandbox", "--disable-setuid-sandbox"],
       timeout: MAPS_TIMEOUT_MS
     });
