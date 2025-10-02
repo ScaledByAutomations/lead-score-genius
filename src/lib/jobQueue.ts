@@ -136,7 +136,6 @@ async function processLeadJob(jobId: string) {
 
   const { job: initialJob, items } = payload;
   let job = initialJob;
-  let claimedByThisInvocation = false;
 
   if (job.status === "completed" || job.status === "failed") {
     return;
@@ -148,22 +147,20 @@ async function processLeadJob(jobId: string) {
       .update({ status: "processing" })
       .eq("id", jobId)
       .eq("status", "queued")
-      .select<LeadJobRow>("*");
+      .select("*")
+      .maybeSingle<LeadJobRow>();
 
     if (claimError) {
       console.error("Failed to claim job", { jobId }, claimError);
       return;
     }
 
-    if (!claimed || claimed.length === 0) {
+    if (!claimed) {
       return;
     }
 
-    job = claimed[0];
-    claimedByThisInvocation = true;
-  }
-
-  if (!claimedByThisInvocation) {
+    job = claimed;
+  } else if (job.status !== "processing") {
     // Another worker already owns processing for this job.
     return;
   }
@@ -341,8 +338,8 @@ export async function enqueueLeadJob(
       processed: 0,
       metadata
     })
-    .select<LeadJobRow>("*")
-    .single();
+    .select("*")
+    .single<LeadJobRow>();
 
   if (jobError || !job) {
     console.error("Failed to enqueue lead job", jobError);
@@ -403,7 +400,7 @@ export async function listJobs(): Promise<JobSnapshot[]> {
 
   const { data: jobs, error } = await client
     .from("lead_jobs")
-    .select<LeadJobRow>("*")
+    .select("*")
     .order("created_at", { ascending: false })
     .limit(50);
 
