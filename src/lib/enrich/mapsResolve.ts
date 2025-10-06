@@ -1,4 +1,5 @@
 import { getEnv } from "../env";
+import { registerLookupSuccess, registerThrottleSignal } from "./mapsLimiter";
 
 const USER_AGENT =
   "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36";
@@ -7,9 +8,10 @@ export async function fetchWithTimeout(url: string, init?: RequestInit): Promise
   const { MAPS_TIMEOUT_MS } = getEnv();
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), MAPS_TIMEOUT_MS);
+  const isGoogleRequest = /google\./i.test(url);
 
   try {
-    return await fetch(url, {
+    const response = await fetch(url, {
       ...init,
       signal: controller.signal,
       headers: {
@@ -17,6 +19,29 @@ export async function fetchWithTimeout(url: string, init?: RequestInit): Promise
         ...(init?.headers ?? {})
       }
     });
+
+    if (isGoogleRequest) {
+      if (response.status === 429 || response.status === 403 || response.status === 503 || response.status >= 500) {
+        registerThrottleSignal({
+          reason: "http_status",
+          status: response.status,
+          url
+        });
+      } else {
+        registerLookupSuccess();
+      }
+    }
+
+    return response;
+  } catch (error) {
+    if (isGoogleRequest) {
+      registerThrottleSignal({
+        reason: error instanceof Error && error.name === "AbortError" ? "timeout" : "fetch_error",
+        error: error instanceof Error ? error.message : String(error),
+        url
+      });
+    }
+    throw error;
   } finally {
     clearTimeout(timeout);
   }

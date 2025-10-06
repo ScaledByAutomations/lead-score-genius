@@ -214,6 +214,12 @@ export async function getMapsSnapshot(
     cached.expiresAt > Date.now() &&
     (cached.snapshot.averageRating !== null || cached.snapshot.reviewCount !== null)
   ) {
+    console.debug("maps snapshot cache hit", {
+      query,
+      providedUrl,
+      companyName,
+      method: cached.snapshot.method
+    });
     return cached.snapshot;
   }
 
@@ -318,6 +324,11 @@ export async function getMapsSnapshot(
 
     headlessSnapshot = sanitizeSnapshot(headless.url, rating, reviewCount, methodLabel);
     if (matchesIdentity && (headlessSnapshot.averageRating !== null || headlessSnapshot.reviewCount !== null)) {
+      console.info("maps snapshot headless success", {
+        query,
+        companyName,
+        method: headlessSnapshot.method
+      });
       cache.set(cacheKey, { snapshot: headlessSnapshot, expiresAt: Date.now() + MAPS_CACHE_TTL_MS });
       return headlessSnapshot;
     }
@@ -326,6 +337,11 @@ export async function getMapsSnapshot(
   if (resolvedProvidedUrl && resolvedProvidedUrl.includes("/maps/place")) {
     const snapshot = await attemptPlace(resolvedProvidedUrl, "provided");
     if (snapshot && (snapshot.averageRating !== null || snapshot.reviewCount !== null)) {
+      console.info("maps snapshot provided success", {
+        query,
+        companyName,
+        method: snapshot.method
+      });
       cache.set(cacheKey, { snapshot, expiresAt: Date.now() + MAPS_CACHE_TTL_MS });
       return snapshot;
     }
@@ -337,6 +353,11 @@ export async function getMapsSnapshot(
     if (extracted) {
       const snapshot = await attemptPlace(extracted, "serp_place");
       if (snapshot && (snapshot.averageRating !== null || snapshot.reviewCount !== null)) {
+        console.info("maps snapshot serp success", {
+          query,
+          companyName,
+          method: snapshot.method
+        });
         cache.set(cacheKey, { snapshot, expiresAt: Date.now() + MAPS_CACHE_TTL_MS });
         return snapshot;
       }
@@ -347,6 +368,11 @@ export async function getMapsSnapshot(
     if (!resolvedProvidedUrl || resolvedProvidedUrl !== apiResolvedUrl) {
       const snapshot = await attemptPlace(apiResolvedUrl, "api_query");
       if (snapshot && (snapshot.averageRating !== null || snapshot.reviewCount !== null)) {
+        console.info("maps snapshot api success", {
+          query,
+          companyName,
+          method: snapshot.method
+        });
         cache.set(cacheKey, { snapshot, expiresAt: Date.now() + MAPS_CACHE_TTL_MS });
         return snapshot;
       }
@@ -390,6 +416,13 @@ export async function getMapsSnapshot(
   );
 
   if (fallback.averageRating === null && fallback.reviewCount === null) {
+    console.warn("maps snapshot miss", {
+      query,
+      companyName,
+      providedUrl,
+      methods: methodsTried,
+      fallback: fallbackMethod
+    });
     return {
       averageRating: null,
       reviewCount: null,
@@ -397,6 +430,14 @@ export async function getMapsSnapshot(
       method: "not_found"
     } satisfies ReviewSnapshot & { method: string };
   }
+
+  console.info("maps snapshot fallback", {
+    query,
+    companyName,
+    providedUrl,
+    methods: methodsTried,
+    fallback: fallbackMethod
+  });
 
   return fallback;
 }
@@ -441,14 +482,26 @@ async function fetchViaJina(
         .slice(Math.max(0, index - 250), Math.min(text.length, index + match[0].length + 250))
         .replace(/\s+/g, " ")
         .trim();
+      const prefix = text.slice(Math.max(0, index - 5), index);
+      const suffix = text.slice(index + match[0].length, Math.min(text.length, index + match[0].length + 10));
       const rating = Number(match[1]);
       const reviewCount = Number(match[2].replace(/,/g, ""));
+      const looksLikePhone = /\+\s*\d/.test(prefix) || /[-]\s*\d/.test(suffix);
+
+      if (looksLikePhone) {
+        console.debug("maps jina candidate skipped phone context", {
+          query,
+          snippet
+        });
+        return null;
+      }
+
       return {
         rating,
         reviewCount: Number.isFinite(reviewCount) ? reviewCount : null,
         snippet
       };
-    });
+    }).filter((candidate): candidate is { rating: number; reviewCount: number | null; snippet: string } => candidate !== null);
 
     console.log("maps jina candidates", {
       query,
