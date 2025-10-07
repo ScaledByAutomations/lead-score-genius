@@ -182,16 +182,6 @@ function escapeCsv(value: string): string {
   return value;
 }
 
-function formatWeight(value: unknown): string {
-  if (typeof value === "number" && Number.isFinite(value)) {
-    return value.toFixed(2);
-  }
-  if (typeof value === "string" && value.trim() !== "") {
-    return value;
-  }
-  return "—";
-}
-
 export default function DashboardPage() {
   const router = useRouter();
   const supabase = useMemo(() => getSupabaseBrowserClient(), []);
@@ -1022,12 +1012,11 @@ export default function DashboardPage() {
                   <thead className="bg-[var(--surface-subtle)] text-xs uppercase text-[var(--muted)]">
                     <tr>
                       <th scope="col" className="px-4 py-3 font-medium">Company</th>
+                      <th scope="col" className="px-4 py-3 font-medium">Contact</th>
                       <th scope="col" className="px-4 py-3 font-medium">Industry</th>
                       <th scope="col" className="px-4 py-3 font-medium">Final score</th>
-                      <th scope="col" className="px-4 py-3 font-medium">Interpretation</th>
                       <th scope="col" className="px-4 py-3 font-medium">Website signals</th>
                       <th scope="col" className="px-4 py-3 font-medium">Reviews</th>
-                      <th scope="col" className="px-4 py-3 font-medium">Weights</th>
                       <th scope="col" className="px-4 py-3 font-medium">Reasoning</th>
                     </tr>
                   </thead>
@@ -1038,9 +1027,32 @@ export default function DashboardPage() {
                           <p className="font-medium text-[var(--foreground)]">{lead.company}</p>
                           {lead.location ? <p className="text-xs text-[var(--muted)]">{lead.location}</p> : null}
                         </td>
+                        <td className="px-4 py-3 text-[var(--muted)]">
+                          {(() => {
+                            const normalized = lead.normalized as ParsedLead | undefined;
+                            const name = normalized ? getValue(normalized, FIELD_ALIASES.contact) : undefined;
+                            const email =
+                              enriched.cleaned.email ??
+                              (normalized ? getValue(normalized, FIELD_ALIASES.email) : undefined);
+
+                            return (
+                              <div className="space-y-1">
+                                <p className="font-medium text-[var(--foreground)]">
+                                  {name && name.trim() !== "" ? name : "—"}
+                                </p>
+                                {email ? (
+                                  <a href={`mailto:${email}`} className="text-xs text-[var(--accent)] underline">
+                                    {email}
+                                  </a>
+                                ) : (
+                                  <p className="text-xs text-[var(--muted)]">No email</p>
+                                )}
+                              </div>
+                            );
+                          })()}
+                        </td>
                         <td className="px-4 py-3 text-[var(--muted)]">{score.industry ?? lead.industry ?? "default"}</td>
                         <td className="px-4 py-3 text-[var(--muted)]">{score.final_score.toFixed(2)}</td>
-                        <td className="px-4 py-3 text-[var(--muted)]">{score.interpretation}</td>
                         <td className="px-4 py-3 text-[var(--muted)]">
                           {(() => {
                             const url = enriched.website?.url ?? (lead.website && (lead.website.startsWith("http") ? lead.website : `https://${lead.website}`));
@@ -1088,15 +1100,6 @@ export default function DashboardPage() {
                                   : "Add a /maps/place URL to your CSV to override."}
                               </p>
                             )}
-                          </div>
-                        </td>
-                        <td className="px-4 py-3 text-[var(--muted)]">
-                          <div className="text-xs text-[var(--muted)]">
-                            <p>Web {formatWeight(score.weights_applied?.website_activity)}</p>
-                            <p>Rev {formatWeight(score.weights_applied?.reviews)}</p>
-                            <p>Years {formatWeight(score.weights_applied?.years_in_business)}</p>
-                            <p>Revenue {formatWeight(score.weights_applied?.revenue_proxies)}</p>
-                            <p>Fit {formatWeight(score.weights_applied?.industry_fit)}</p>
                           </div>
                         </td>
                         <td className="px-4 py-3 text-[var(--muted)]">
