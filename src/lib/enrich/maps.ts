@@ -482,11 +482,17 @@ async function fetchViaJina(
         .slice(Math.max(0, index - 250), Math.min(text.length, index + match[0].length + 250))
         .replace(/\s+/g, " ")
         .trim();
-      const prefix = text.slice(Math.max(0, index - 5), index);
-      const suffix = text.slice(index + match[0].length, Math.min(text.length, index + match[0].length + 10));
-      const rating = Number(match[1]);
-      const reviewCount = Number(match[2].replace(/,/g, ""));
-      const looksLikePhone = /\+\s*\d/.test(prefix) || /[-]\s*\d/.test(suffix);
+      const prefix = text.slice(Math.max(0, index - 15), index);
+      const suffix = text.slice(index + match[0].length, Math.min(text.length, index + match[0].length + 20));
+      const rawRating = Number(match[1]);
+      const rawReviewCount = Number(match[2].replace(/,/g, ""));
+      if (!Number.isFinite(rawRating) || !Number.isFinite(rawReviewCount)) {
+        return null;
+      }
+      const looksLikePhone =
+        /\+\s*\d/.test(prefix) ||
+        /[-]\s*\d/.test(suffix) ||
+        /phone|call|tel/i.test(snippet);
 
       if (looksLikePhone) {
         console.debug("maps jina candidate skipped phone context", {
@@ -497,11 +503,11 @@ async function fetchViaJina(
       }
 
       return {
-        rating,
-        reviewCount: Number.isFinite(reviewCount) ? reviewCount : null,
+        rating: rawRating,
+        reviewCount: rawReviewCount,
         snippet
       };
-    }).filter((candidate): candidate is { rating: number; reviewCount: number | null; snippet: string } => candidate !== null);
+    }).filter((candidate): candidate is { rating: number; reviewCount: number; snippet: string } => candidate !== null);
 
     console.log("maps jina candidates", {
       query,
@@ -512,14 +518,20 @@ async function fetchViaJina(
     const scored = candidates
       .map((candidate) => {
         const normalizedSnippet = candidate.snippet.toLowerCase();
+        if (!/reviews?/i.test(candidate.snippet)) {
+          return null;
+        }
         const matchedTokens = matchTokens.filter((token) => normalizedSnippet.includes(token));
         const identityMatches = requiredTokens.length > 0
           ? requiredTokens.filter((token) => normalizedSnippet.includes(token))
           : matchedTokens;
         const primaryMatches = primaryTokens.filter((token) => normalizedSnippet.includes(token));
         const tokenScore = matchedTokens.length + primaryMatches.length;
+        const hasFiveStarIcon = /\u2605|⭐|★★★★★/.test(candidate.snippet);
+        const isFiveStarText = /5\s*★|5\.0\s*out of 5/i.test(candidate.snippet);
+        const looseMatchThreshold = matchTokens.length >= 3 ? 2 : 1;
         const hasIdentityMatch = requiredTokens.length === 0
-          ? matchedTokens.length > 0
+          ? matchedTokens.length >= looseMatchThreshold
           : identityMatches.length >= Math.max(1, minRequiredMatches);
         return {
           ...candidate,
@@ -527,10 +539,33 @@ async function fetchViaJina(
           identityMatches,
           primaryMatches,
           tokenScore,
-          hasIdentityMatch
+          hasIdentityMatch,
+          hasFiveStarIcon,
+          isFiveStarText
         };
       })
-      .filter((candidate) => candidate.tokenScore > 0 && candidate.hasIdentityMatch)
+      .filter((candidate): candidate is {
+        rating: number;
+        reviewCount: number;
+        snippet: string;
+        matchedTokens: string[];
+        identityMatches: string[];
+        primaryMatches: string[];
+        tokenScore: number;
+        hasIdentityMatch: boolean;
+        hasFiveStarIcon: boolean;
+        isFiveStarText: boolean;
+      } => candidate !== null)
+      .filter((candidate) => {
+        if (candidate.tokenScore === 0 || !candidate.hasIdentityMatch) {
+          return false;
+        }
+        const isFiveStarHighCount = candidate.rating === 5 && candidate.reviewCount >= 5;
+        if (isFiveStarHighCount && !candidate.hasFiveStarIcon && !candidate.isFiveStarText) {
+          return false;
+        }
+        return true;
+      })
       .sort((a, b) => {
         const identityDiff = (b.identityMatches?.length ?? 0) - (a.identityMatches?.length ?? 0);
         if (identityDiff !== 0) {

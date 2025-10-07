@@ -7,6 +7,8 @@ import type { LeadInput, LeadScoreApiResponse, LeadScoreResponse } from "@/lib/t
 import { ThemeToggle } from "@/components/ThemeToggle";
 import { getSupabaseBrowserClient } from "@/lib/supabaseBrowser";
 
+const ACTIVE_JOB_STORAGE_KEY = "lead-score-genius-active-job-id";
+
 type ParsedLead = Record<string, string>;
 
 type JobStatus = "pending" | "processing" | "completed" | "failed";
@@ -194,8 +196,6 @@ export default function DashboardPage() {
   const router = useRouter();
   const supabase = useMemo(() => getSupabaseBrowserClient(), []);
 
-  const ACTIVE_JOB_STORAGE_KEY = "lead-score-genius-active-job-id";
-
   const [authChecked, setAuthChecked] = useState(false);
   const [currentUserEmail, setCurrentUserEmail] = useState<string | null>(null);
   const [currentUserId, setCurrentUserId] = useState<string | null>(null);
@@ -245,6 +245,26 @@ export default function DashboardPage() {
         return `${base} border border-[var(--border)] bg-[var(--surface)] text-[var(--muted)]`;
     }
   }, [saveState, supabaseStatus]);
+
+  const cancelDisabled = useMemo(() => {
+    if (isCancelling) {
+      return true;
+    }
+    const jobActive = jobId || (activeJob && activeJob.status !== "completed" && activeJob.status !== "failed");
+    return !jobActive;
+  }, [isCancelling, jobId, activeJob]);
+
+  const cancelButtonClass = useMemo(() => {
+    const base = "rounded-md px-3 py-1.5 text-sm font-medium transition";
+    if (isCancelling) {
+      return `${base} cursor-progress border border-[var(--border)] bg-[var(--surface-subtle)] text-[var(--muted)]`;
+    }
+    const jobActive = jobId || (activeJob && activeJob.status !== "completed" && activeJob.status !== "failed");
+    if (jobActive) {
+      return `${base} border border-[color:var(--error)] bg-transparent text-[color:var(--error)] hover:bg-[color:var(--error)]/15`;
+    }
+    return `${base} cursor-not-allowed border border-[var(--border)] bg-[var(--surface)] text-[var(--muted)]`;
+  }, [isCancelling, jobId, activeJob]);
 
   useEffect(() => {
     let cancelled = false;
@@ -596,13 +616,14 @@ export default function DashboardPage() {
   }, [pendingLeads, useCleaner, autoSaveToSupabase, supabaseStatus, currentUserId]);
 
   const handleCancelJob = useCallback(async () => {
-    if (!jobId) {
+    const targetJobId = jobId ?? activeJob?.id ?? null;
+    if (!targetJobId) {
       return;
     }
 
     setIsCancelling(true);
     try {
-      const response = await fetch(`/api/score-leads/jobs/${jobId}/cancel`, {
+      const response = await fetch(`/api/score-leads/jobs/${targetJobId}/cancel`, {
         method: "POST",
         headers: {
           "Content-Type": "application/json"
@@ -638,7 +659,7 @@ export default function DashboardPage() {
     } finally {
       setIsCancelling(false);
     }
-  }, [jobId]);
+  }, [jobId, activeJob]);
 
   const summary = useMemo(() => {
     if (scoredLeads.length === 0) {
@@ -878,20 +899,6 @@ export default function DashboardPage() {
                   : `Ready to score ${pendingLeads.length} lead${pendingLeads.length === 1 ? "" : "s"}. Adjust settings, then run scoring.`}
               </p>
               <div className="flex gap-2">
-                {processing && jobId ? (
-                  <button
-                    type="button"
-                    onClick={handleCancelJob}
-                    disabled={isCancelling}
-                    className={`rounded-md px-3 py-1.5 text-sm font-medium transition ${
-                      isCancelling
-                        ? "cursor-progress border border-[var(--border)] bg-[var(--surface-subtle)] text-[var(--muted)]"
-                        : "border border-[color:var(--error)] bg-[color:var(--error)]/10 text-[color:var(--error)] hover:bg-[color:var(--error)]/20"
-                    }`}
-                  >
-                    {isCancelling ? "Cancelling…" : "Cancel run"}
-                  </button>
-                ) : null}
                 <button
                   type="button"
                   onClick={handleScoreLeads}
@@ -903,6 +910,14 @@ export default function DashboardPage() {
                   }`}
                 >
                   {processing ? "Scoring…" : "Score leads"}
+                </button>
+                <button
+                  type="button"
+                  onClick={handleCancelJob}
+                  disabled={cancelDisabled}
+                  className={cancelButtonClass}
+                >
+                  {isCancelling ? "Cancelling…" : "Cancel run"}
                 </button>
               </div>
             </div>

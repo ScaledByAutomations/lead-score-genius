@@ -10,6 +10,7 @@ export type CleanLead = {
   website?: string;
   location?: string;
   email?: string;
+  phone?: string;
   notes?: string;
   maps_url?: string;
   years_in_business?: number | null;
@@ -21,6 +22,15 @@ const WEBSITE_FIELDS = ["website", "website_url", "url", "domain", "homepage"];
 const INDUSTRY_FIELDS = ["industry", "vertical", "segment", "category"];
 const LOCATION_FIELDS = ["location", "city", "state", "province", "country", "region", "address"];
 const EMAIL_FIELDS = ["email", "email_address", "contact_email"];
+const PHONE_FIELDS = [
+  "phone",
+  "phone_number",
+  "contact_phone",
+  "mobile",
+  "cell",
+  "telephone",
+  "tel"
+];
 const FOUNDED_FIELDS = ["founded", "year_founded", "founded_year", "established", "since"];
 
 const URL_IN_TEXT_REGEX = /https?:\/\/[^\s"'<>()]+/gi;
@@ -61,6 +71,24 @@ function normalizeWebsite(raw?: string): string | undefined {
   } catch {
     return undefined;
   }
+}
+
+function normalizePhone(raw?: string): string | undefined {
+  if (!raw) {
+    return undefined;
+  }
+
+  const cleaned = raw.replace(/[()\.\s-]+/g, "").replace(/^[+]/, "");
+  const digits = cleaned.replace(/[^0-9]/g, "");
+  if (digits.length < 7 || digits.length > 15) {
+    return undefined;
+  }
+
+  if (digits.length === 10) {
+    return `+1${digits}`;
+  }
+
+  return `+${digits}`;
 }
 
 function deriveWebsiteFromEmail(raw?: string): string | undefined {
@@ -137,22 +165,44 @@ function detectMapsUrl(record: RawLeadRecord): string | undefined {
   return undefined;
 }
 
+function truncate(value: string | undefined | null, limit: number): string | undefined {
+  if (!value) {
+    return undefined;
+  }
+  if (value.length <= limit) {
+    return value;
+  }
+  return `${value.slice(0, limit)}…`;
+}
+
 async function runAiCleaner(base: CleanLead, enabled: boolean): Promise<CleanLead> {
   if (!enabled) {
     return base;
   }
 
   try {
+    const payload = {
+      lead_id: base.lead_id,
+      company: base.company,
+      industry: base.industry ?? null,
+      website: base.website ?? null,
+      location: base.location ?? null,
+      email: base.email ?? null,
+      phone: base.phone ?? null,
+      notes: truncate(base.notes, 300)
+    };
+
     const response = await callOpenRouter([
       {
         role: "system",
         content:
-          "Normalize lead data. Return JSON with fields: company, website, location, industry, maps_url, notes. Keep empty string for missing." +
-          " Only use information present in the input."
+          "Normalize lead contact fields. Input provides lead_id, company, website, email, phone." +
+          " Return JSON with fields: company, website, email, phone, maps_url. Leave missing data as empty strings." +
+          " Do not infer new facts."
       },
       {
         role: "user",
-        content: JSON.stringify(base)
+        content: JSON.stringify(payload)
       }
     ]);
 
@@ -160,10 +210,12 @@ async function runAiCleaner(base: CleanLead, enabled: boolean): Promise<CleanLea
       ...base,
       company: response.company ?? base.company,
       website: response.website || base.website,
-      location: response.location || base.location,
-      industry: response.industry || base.industry,
+      email: response.email || base.email,
+      phone: response.phone || base.phone,
       maps_url: response.maps_url || base.maps_url,
-      notes: response.notes || base.notes
+      location: base.location,
+      industry: base.industry,
+      notes: base.notes
     };
   } catch (error) {
     console.error("AI cleaner failed", error);
@@ -188,6 +240,8 @@ export async function cleanLeadRecord(
   const location = combineLocation(record);
   const yearsInBusiness = parseYearsInBusiness(record);
   const mapsUrl = detectMapsUrl(record);
+  const phoneRaw = firstValue(record, PHONE_FIELDS) ?? record.phone ?? record.phoneNumber;
+  const phone = normalizePhone(phoneRaw);
 
   const base: CleanLead = {
     lead_id: leadId,
@@ -196,6 +250,7 @@ export async function cleanLeadRecord(
     website,
     location,
     email,
+    phone,
     years_in_business: yearsInBusiness,
     maps_url: mapsUrl,
     notes: record.notes,

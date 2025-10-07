@@ -146,6 +146,31 @@ export async function scoreLeadWithModel(
 ): Promise<LeadScoreResponse> {
   const weights = selectWeights(lead.industry);
 
+  const leadPayload = {
+    lead_id: lead.lead_id,
+    company: lead.company,
+    industry: lead.industry ?? null,
+    website: lead.website ?? null,
+    email: lead.email ?? null,
+    phone: lead.phone ?? null,
+    years_in_business: lead.years_in_business ?? null
+  };
+
+  const reviewsPayload = {
+    averageRating: reviews.averageRating,
+    reviewCount: reviews.reviewCount,
+    method: reviews.method ?? null
+  };
+
+  const websitePayload = website
+    ? {
+        url: website.url,
+        finalScore: website.finalScore,
+        ok: website.ok,
+        bonuses: website.bonuses
+      }
+    : null;
+
   const messages = [
     {
       role: "system" as const,
@@ -159,9 +184,9 @@ If data is missing, set score to 0 and explain.
     {
       role: "user" as const,
       content: JSON.stringify({
-        lead,
-        reviews,
-        website,
+        lead: leadPayload,
+        reviews: reviewsPayload,
+        website: websitePayload,
         weights,
         guidance: {
           website_activity: "Use website.finalScore when provided. Mention method and bonuses in reasoning.",
