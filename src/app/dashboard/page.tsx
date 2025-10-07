@@ -215,6 +215,7 @@ export default function DashboardPage() {
   const [jobId, setJobId] = useState<string | null>(null);
   const [activeJob, setActiveJob] = useState<JobSnapshot | null>(null);
   const [isCancelling, setIsCancelling] = useState(false);
+  const [cancelRequested, setCancelRequested] = useState(false);
 
   const statusBadgeClass = useMemo(() => {
     switch (supabaseStatus) {
@@ -250,21 +251,19 @@ export default function DashboardPage() {
     if (isCancelling) {
       return true;
     }
-    const jobActive = jobId || (activeJob && activeJob.status !== "completed" && activeJob.status !== "failed");
-    return !jobActive;
-  }, [isCancelling, jobId, activeJob]);
+    return !processing && !cancelRequested;
+  }, [isCancelling, processing, cancelRequested]);
 
   const cancelButtonClass = useMemo(() => {
     const base = "rounded-md px-3 py-1.5 text-sm font-medium transition";
     if (isCancelling) {
       return `${base} cursor-progress border border-[var(--border)] bg-[var(--surface-subtle)] text-[var(--muted)]`;
     }
-    const jobActive = jobId || (activeJob && activeJob.status !== "completed" && activeJob.status !== "failed");
-    if (jobActive) {
-      return `${base} border border-[color:var(--error)] bg-transparent text-[color:var(--error)] hover:bg-[color:var(--error)]/15`;
+    if (cancelDisabled) {
+      return `${base} cursor-not-allowed border border-[var(--border)] bg-[var(--surface)] text-[var(--muted)]`;
     }
-    return `${base} cursor-not-allowed border border-[var(--border)] bg-[var(--surface)] text-[var(--muted)]`;
-  }, [isCancelling, jobId, activeJob]);
+    return `${base} border border-[color:var(--error)] bg-transparent text-[color:var(--error)] hover:bg-[color:var(--error)]/15`;
+  }, [isCancelling, cancelDisabled]);
 
   useEffect(() => {
     let cancelled = false;
@@ -615,51 +614,79 @@ export default function DashboardPage() {
     }
   }, [pendingLeads, useCleaner, autoSaveToSupabase, supabaseStatus, currentUserId]);
 
-  const handleCancelJob = useCallback(async () => {
+  const cancelJobById = useCallback(
+    async (targetJobId: string) => {
+      setIsCancelling(true);
+      try {
+        const response = await fetch(`/api/score-leads/jobs/${targetJobId}/cancel`, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json"
+          },
+          body: JSON.stringify({ reason: "Cancelled from dashboard" })
+        });
+
+        if (!response.ok) {
+          const payload = await response.json().catch(() => ({}));
+          throw new Error(payload?.error ?? "Failed to cancel scoring job.");
+        }
+
+        const data = (await response.json()) as { job: JobSnapshot };
+
+        setActiveJob(data.job);
+        setScoredLeads(data.job.results ?? []);
+        setProcessing(false);
+        setJobId(null);
+        setError(data.job.error ?? "Lead scoring run cancelled.");
+        if (typeof window !== "undefined") {
+          window.localStorage.removeItem(ACTIVE_JOB_STORAGE_KEY);
+        }
+
+        if (data.job.supabase?.requested) {
+          setSaveState("error");
+          setSaveError(data.job.error ?? "Supabase save cancelled.");
+        } else {
+          setSaveState("idle");
+          setSaveError(null);
+        }
+      } catch (cancelError) {
+        setError(cancelError instanceof Error ? cancelError.message : "Failed to cancel scoring job.");
+      } finally {
+        setIsCancelling(false);
+        setCancelRequested(false);
+      }
+    },
+    [setActiveJob, setScoredLeads, setProcessing, setJobId, setError, setSaveState, setSaveError]
+  );
+
+  const handleCancelJob = useCallback(() => {
+    if (!processing || isCancelling) {
+      return;
+    }
     const targetJobId = jobId ?? activeJob?.id ?? null;
     if (!targetJobId) {
+      setCancelRequested(true);
+      setIsCancelling(true);
       return;
     }
 
-    setIsCancelling(true);
-    try {
-      const response = await fetch(`/api/score-leads/jobs/${targetJobId}/cancel`, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json"
-        },
-        body: JSON.stringify({ reason: "Cancelled from dashboard" })
-      });
+    void cancelJobById(targetJobId);
+  }, [processing, isCancelling, jobId, activeJob, cancelJobById]);
 
-      if (!response.ok) {
-        const payload = await response.json().catch(() => ({}));
-        throw new Error(payload?.error ?? "Failed to cancel scoring job.");
-      }
-
-      const data = (await response.json()) as { job: JobSnapshot };
-
-      setActiveJob(data.job);
-      setScoredLeads(data.job.results ?? []);
-      setProcessing(false);
-      setJobId(null);
-      setError(data.job.error ?? "Lead scoring run cancelled.");
-      if (typeof window !== "undefined") {
-        window.localStorage.removeItem(ACTIVE_JOB_STORAGE_KEY);
-      }
-
-      if (data.job.supabase?.requested) {
-        setSaveState("error");
-        setSaveError(data.job.error ?? "Supabase save cancelled.");
-      } else {
-        setSaveState("idle");
-        setSaveError(null);
-      }
-    } catch (cancelError) {
-      setError(cancelError instanceof Error ? cancelError.message : "Failed to cancel scoring job.");
-    } finally {
+  useEffect(() => {
+    if (!cancelRequested) {
+      return;
+    }
+    const targetJobId = jobId ?? activeJob?.id ?? null;
+    if (targetJobId) {
+      void cancelJobById(targetJobId);
+      return;
+    }
+    if (!processing) {
+      setCancelRequested(false);
       setIsCancelling(false);
     }
-  }, [jobId, activeJob]);
+  }, [cancelRequested, jobId, activeJob, cancelJobById, processing]);
 
   const summary = useMemo(() => {
     if (scoredLeads.length === 0) {
