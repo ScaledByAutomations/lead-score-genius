@@ -7,6 +7,13 @@ import type { LeadInput, LeadScoreApiResponse } from "@/lib/types";
 
 const DEFAULT_MAX_CONCURRENCY = Number(process.env.MAX_CONCURRENCY ?? "5");
 
+export class LeadScoringAbortError extends Error {
+  constructor(message = "Lead scoring aborted") {
+    super(message);
+    this.name = "LeadScoringAbortError";
+  }
+}
+
 const normalizeKey = (value?: string | null) => {
   if (!value) {
     return null;
@@ -45,6 +52,7 @@ export type ScoreLeadOptions = {
   saveToSupabase?: boolean;
   userId?: string | null;
   maxConcurrency?: number;
+  signal?: AbortSignal | null;
   onProgress?: (payload: {
     processed: number;
     total: number;
@@ -67,10 +75,24 @@ export async function scoreLeads(
   const useCleaner = options.useCleaner !== false;
   const saveToSupabase = options.saveToSupabase === true;
   const maxConcurrency = options.maxConcurrency ?? DEFAULT_MAX_CONCURRENCY;
+  const abortSignal = options.signal ?? null;
 
   const batches: LeadScoreApiResponse["leads"] = [];
   const orderMap = new Map(leads.map((lead, index) => [lead.lead_id, index]));
   const reviewPromiseCache = new Map<string, Promise<Awaited<ReturnType<typeof fetchGoogleMapsReviews>>>>();
+  let aborted = abortSignal?.aborted ?? false;
+
+  const handleAbort = () => {
+    aborted = true;
+  };
+
+  abortSignal?.addEventListener("abort", handleAbort);
+
+  const ensureNotAborted = () => {
+    if (aborted) {
+      throw new LeadScoringAbortError();
+    }
+  };
 
   const queue = [...leads];
   const workers: Promise<void>[] = [];
@@ -83,10 +105,12 @@ export async function scoreLeads(
     let websiteDuration = 0;
     let scoreDuration = 0;
     let reviewCacheHitKey: string | null = null;
-    let status: "success" | "error" = "success";
+    let status: "success" | "error" | "cancelled" = "success";
     let reviewStart = 0;
     let websiteStart = 0;
     let scoreStart = 0;
+
+    ensureNotAborted();
 
     let cleaned: Awaited<ReturnType<typeof cleanLeadRecord>> | null = null;
     let reviewSnapshot: Awaited<ReturnType<typeof fetchGoogleMapsReviews>> = {
@@ -103,6 +127,8 @@ export async function scoreLeads(
       const cleanStart = Date.now();
       cleaned = await cleanLeadRecord(rawRecord, lead.lead_id, { useAi: useCleaner });
       cleanDuration = Date.now() - cleanStart;
+
+      ensureNotAborted();
 
       const queryParts = [cleaned.company, cleaned.location].filter(Boolean).join(" ");
       const companyIdentifier = cleaned.company ?? lead.company ?? "";
@@ -168,9 +194,13 @@ export async function scoreLeads(
         throw new Error("Review lookup initialization failed");
       }
 
+      ensureNotAborted();
+
       reviewStart = Date.now();
       reviewSnapshot = await reviewPromise;
       reviewDuration = Date.now() - reviewStart;
+
+      ensureNotAborted();
 
       if (reviewSnapshot.averageRating === null && reviewSnapshot.reviewCount === null) {
         const keyList = Array.from(reviewCacheKeys);
@@ -187,6 +217,8 @@ export async function scoreLeads(
         websiteDuration = Date.now() - websiteStart;
         websiteSignals = websiteResult;
       }
+
+      ensureNotAborted();
 
       scoreStart = Date.now();
       const score = await scoreLeadWithModel(cleaned, reviewSnapshot, websiteSignals);
@@ -212,6 +244,10 @@ export async function scoreLeads(
         });
       }
     } catch (processingError) {
+      if (processingError instanceof LeadScoringAbortError) {
+        status = "cancelled";
+        throw processingError;
+      }
       status = "error";
       if (websitePromise) {
         try {
@@ -309,58 +345,74 @@ export async function scoreLeads(
     }
   };
 
-  while (queue.length > 0 || workers.length > 0) {
-    while (queue.length > 0 && workers.length < maxConcurrency) {
-      const lead = queue.shift();
-      if (!lead) {
+  try {
+    while (queue.length > 0 || workers.length > 0) {
+      if (aborted) {
         break;
       }
-      const worker = processLead(lead).finally(() => {
-        const index = workers.indexOf(worker);
-        if (index >= 0) {
-          workers.splice(index, 1);
+
+      while (queue.length > 0 && workers.length < maxConcurrency) {
+        if (aborted) {
+          break;
         }
-      });
-      workers.push(worker);
-    }
-
-    if (workers.length > 0) {
-      await Promise.race(workers);
-    }
-  }
-
-  batches.sort((a, b) => (orderMap.get(a.lead.lead_id) ?? 0) - (orderMap.get(b.lead.lead_id) ?? 0));
-
-  let supabaseResult: LeadScoreApiResponse["supabase"] = null;
-
-  if (saveToSupabase) {
-    try {
-      const client = getSupabaseAdminClient();
-      if (!client) {
-        throw new Error("Supabase environment variables missing");
+        const lead = queue.shift();
+        if (!lead) {
+          break;
+        }
+        const worker = processLead(lead).finally(() => {
+          const index = workers.indexOf(worker);
+          if (index >= 0) {
+            workers.splice(index, 1);
+          }
+        });
+        workers.push(worker);
       }
-      const result = await saveLeadRunsToSupabase(
-        batches,
-        client,
-        options.userId ?? null
-      );
-      supabaseResult = { ...result, requested: true };
-    } catch (supabaseError) {
-      supabaseResult = {
-        saved: false,
-        count: 0,
-        error:
-          supabaseError instanceof Error
-            ? supabaseError.message
-            : String(supabaseError),
-        requested: true
-      };
+
+      if (workers.length > 0) {
+        await Promise.race(workers);
+      }
     }
-  }
 
-  if (saveToSupabase && !supabaseResult) {
-    supabaseResult = { saved: false, count: 0, requested: true };
-  }
+    if (aborted) {
+      await Promise.allSettled(workers);
+      throw new LeadScoringAbortError();
+    }
 
-  return { leads: batches, supabase: supabaseResult };
+    batches.sort((a, b) => (orderMap.get(a.lead.lead_id) ?? 0) - (orderMap.get(b.lead.lead_id) ?? 0));
+
+    let supabaseResult: LeadScoreApiResponse["supabase"] = null;
+
+    if (saveToSupabase) {
+      try {
+        const client = getSupabaseAdminClient();
+        if (!client) {
+          throw new Error("Supabase environment variables missing");
+        }
+        const result = await saveLeadRunsToSupabase(
+          batches,
+          client,
+          options.userId ?? null
+        );
+        supabaseResult = { ...result, requested: true };
+      } catch (supabaseError) {
+        supabaseResult = {
+          saved: false,
+          count: 0,
+          error:
+            supabaseError instanceof Error
+              ? supabaseError.message
+              : String(supabaseError),
+          requested: true
+        };
+      }
+    }
+
+    if (saveToSupabase && !supabaseResult) {
+      supabaseResult = { saved: false, count: 0, requested: true };
+    }
+
+    return { leads: batches, supabase: supabaseResult };
+  } finally {
+    abortSignal?.removeEventListener("abort", handleAbort);
+  }
 }

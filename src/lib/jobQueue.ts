@@ -3,9 +3,10 @@ import type { SupabaseClient } from "@supabase/supabase-js";
 
 import type { LeadInput, LeadScoreApiResponse } from "@/lib/types";
 import { getSupabaseAdminClient } from "@/lib/supabase";
-import { scoreLeads, type ScoreLeadOptions } from "@/lib/scoreLeads";
+import { LeadScoringAbortError, scoreLeads, type ScoreLeadOptions } from "@/lib/scoreLeads";
 
 const STALE_JOB_THRESHOLD_MS = Number(process.env.LEAD_JOB_STALE_MS ?? "60000");
+const jobAbortControllers = new Map<string, AbortController>();
 
 type JobStatus = "pending" | "processing" | "completed" | "failed";
 
@@ -252,12 +253,16 @@ async function processLeadJob(jobId: string) {
 
   const leadsToProcess = pendingItems.map((item) => item.payload);
 
+  const controller = new AbortController();
+  jobAbortControllers.set(jobId, controller);
+
   try {
     const result = await scoreLeads(leadsToProcess, {
       useCleaner: options.useCleaner,
       saveToSupabase: options.saveToSupabase,
       userId: job.user_id,
       maxConcurrency: options.maxConcurrency,
+      signal: controller.signal,
       onProgress: async ({ lead, result: leadResult }) => {
         const queue = indexQueues.get(lead.lead_id);
         const itemIndex = queue?.shift();
@@ -333,27 +338,33 @@ async function processLeadJob(jobId: string) {
       console.error("Failed to mark job completed", { jobId }, completeError);
     }
   } catch (error) {
-    console.error("Lead job processing failed", { jobId }, error);
+    if (error instanceof LeadScoringAbortError) {
+      console.info("Lead job cancelled", { jobId });
+    } else {
+      console.error("Lead job processing failed", { jobId }, error);
 
-    const errorMessage = error instanceof Error ? error.message : String(error);
-    const { error: jobError } = await client
-      .from("lead_jobs")
-      .update({ status: "failed", error: errorMessage, processed: processedCount })
-      .eq("id", jobId);
+      const errorMessage = error instanceof Error ? error.message : String(error);
+      const { error: jobError } = await client
+        .from("lead_jobs")
+        .update({ status: "failed", error: errorMessage, processed: processedCount })
+        .eq("id", jobId);
 
-    if (jobError) {
-      console.error("Failed to mark job failed", { jobId }, jobError);
+      if (jobError) {
+        console.error("Failed to mark job failed", { jobId }, jobError);
+      }
+
+      const { error: remainingError } = await client
+        .from("lead_job_items")
+        .update({ status: "failed", error: errorMessage })
+        .eq("job_id", jobId)
+        .in("status", ["queued", "processing"]);
+
+      if (remainingError) {
+        console.error("Failed to update remaining job items", { jobId }, remainingError);
+      }
     }
-
-    const { error: remainingError } = await client
-      .from("lead_job_items")
-      .update({ status: "failed", error: errorMessage })
-      .eq("job_id", jobId)
-      .in("status", ["queued", "processing"]);
-
-    if (remainingError) {
-      console.error("Failed to update remaining job items", { jobId }, remainingError);
-    }
+  } finally {
+    jobAbortControllers.delete(jobId);
   }
 }
 
@@ -461,4 +472,57 @@ export function triggerLeadJob(jobId: string) {
   processLeadJob(jobId).catch((error) => {
     console.error("Background lead job failed", { jobId }, error);
   });
+}
+
+export async function cancelJob(jobId: string, reason?: string): Promise<JobSnapshot | null> {
+  const client = getSupabaseAdminClient();
+  if (!client) {
+    throw new Error("Supabase client not configured");
+  }
+
+  const message = reason && reason.trim().length > 0 ? reason.trim() : "Cancelled by user";
+  const now = new Date().toISOString();
+
+  const { data: updatedJob, error: updateError } = await client
+    .from("lead_jobs")
+    .update({ status: "failed", error: message, updated_at: now })
+    .eq("id", jobId)
+    .in("status", ["queued", "processing"])
+    .select("*")
+    .maybeSingle<LeadJobRow>();
+
+  if (updateError) {
+    console.error("Failed to cancel job", { jobId }, updateError);
+    throw new Error(updateError.message ?? "Failed to cancel job");
+  }
+
+  if (!updatedJob) {
+    const controller = jobAbortControllers.get(jobId);
+    if (controller) {
+      controller.abort();
+      jobAbortControllers.delete(jobId);
+    }
+
+    const payload = await loadJob(client, jobId);
+    return payload ? toSnapshot(payload.job, payload.items) : null;
+  }
+
+  const { error: itemsError } = await client
+    .from("lead_job_items")
+    .update({ status: "failed", error: message })
+    .eq("job_id", jobId)
+    .in("status", ["queued", "processing"]);
+
+  if (itemsError) {
+    console.error("Failed to cancel pending job items", { jobId }, itemsError);
+  }
+
+  const controller = jobAbortControllers.get(jobId);
+  if (controller) {
+    controller.abort();
+    jobAbortControllers.delete(jobId);
+  }
+
+  const payload = await loadJob(client, jobId);
+  return payload ? toSnapshot(payload.job, payload.items) : null;
 }
