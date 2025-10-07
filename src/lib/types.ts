@@ -21,6 +21,17 @@ export type SupabaseSaveResult = {
   error?: string;
 };
 
+export type TokenUsageTotals = {
+  promptTokens: number;
+  completionTokens: number;
+  totalTokens: number;
+};
+
+export type TokenUsageSummary = {
+  cleaning: TokenUsageTotals;
+  scoring: TokenUsageTotals;
+};
+
 export type LeadScoreResponse = {
   lead_id: string;
   industry: string;
@@ -58,4 +69,5 @@ export type LeadScoreApiResponse = {
     };
   }>;
   supabase?: (SupabaseSaveResult & { requested: boolean }) | null;
+  usage?: TokenUsageSummary;
 };

@@ -3,7 +3,12 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
 
-import type { LeadInput, LeadScoreApiResponse, LeadScoreResponse } from "@/lib/types";
+import type {
+  LeadInput,
+  LeadScoreApiResponse,
+  LeadScoreResponse,
+  TokenUsageSummary
+} from "@/lib/types";
 import { ThemeToggle } from "@/components/ThemeToggle";
 import { getSupabaseBrowserClient } from "@/lib/supabaseBrowser";
 
@@ -22,6 +27,7 @@ type JobSnapshot = {
   updatedAt: number;
   error?: string;
   supabase: LeadScoreApiResponse["supabase"];
+  usage?: TokenUsageSummary | null;
   results: LeadScoreApiResponse["leads"];
 };
 
@@ -44,6 +50,11 @@ const FIELD_ALIASES = {
 const FALLBACK_HEADERS = {
   id: "lead_id",
   company: "company"
+};
+
+const EMPTY_USAGE: TokenUsageSummary = {
+  cleaning: { promptTokens: 0, completionTokens: 0, totalTokens: 0 },
+  scoring: { promptTokens: 0, completionTokens: 0, totalTokens: 0 }
 };
 
 function normalizeKey(input: string, index: number): string {
@@ -193,6 +204,7 @@ export default function DashboardPage() {
   const [processing, setProcessing] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [scoredLeads, setScoredLeads] = useState<LeadScoreApiResponse["leads"]>([]);
+  const [tokenUsage, setTokenUsage] = useState<TokenUsageSummary>(EMPTY_USAGE);
   const [originalHeaders, setOriginalHeaders] = useState<string[]>([]);
   const [originalRows, setOriginalRows] = useState<Record<string, string>[]>([]);
   const [pendingLeads, setPendingLeads] = useState<LeadInput[]>([]);
@@ -508,6 +520,7 @@ export default function DashboardPage() {
     setError(null);
     setActiveJob(null);
     setJobId(null);
+    setTokenUsage(EMPTY_USAGE);
     if (typeof window !== "undefined") {
       window.localStorage.removeItem(ACTIVE_JOB_STORAGE_KEY);
     }
@@ -550,6 +563,9 @@ export default function DashboardPage() {
         setJobId(data.job.id);
         setActiveJob(data.job);
         setScoredLeads(data.job.results ?? []);
+        setTokenUsage(data.job.usage ?? EMPTY_USAGE);
+        setTokenUsage(data.job.usage ?? EMPTY_USAGE);
+        setTokenUsage(data.job.usage ?? EMPTY_USAGE);
         if (typeof window !== "undefined") {
           window.localStorage.setItem(ACTIVE_JOB_STORAGE_KEY, data.job.id);
         }
@@ -572,6 +588,7 @@ export default function DashboardPage() {
       const json = (await response.json()) as LeadScoreApiResponse;
 
       setScoredLeads(json.leads);
+      setTokenUsage(json.usage ?? EMPTY_USAGE);
       setActiveJob(null);
       setJobId(null);
       if (json.supabase?.requested) {
@@ -588,6 +605,7 @@ export default function DashboardPage() {
       }
     } catch (scoreError) {
       setError(scoreError instanceof Error ? scoreError.message : "Failed to score leads.");
+      setTokenUsage(EMPTY_USAGE);
       if (willAutoSave) {
         setSaveState("error");
         setSaveError("Scoring failed before Supabase save could complete.");
@@ -641,6 +659,7 @@ export default function DashboardPage() {
         }
       } catch (cancelError) {
         setError(cancelError instanceof Error ? cancelError.message : "Failed to cancel scoring job.");
+        setTokenUsage(EMPTY_USAGE);
       } finally {
         setIsCancelling(false);
         setCancelRequested(false);
@@ -789,6 +808,7 @@ export default function DashboardPage() {
         setActiveJob(null);
         setError(pollError instanceof Error ? pollError.message : "Unable to poll job status.");
         setSaveState((prev) => (prev === "saving" ? "error" : prev));
+        setTokenUsage(EMPTY_USAGE);
         if (typeof window !== "undefined") {
           window.localStorage.removeItem(ACTIVE_JOB_STORAGE_KEY);
         }
@@ -964,6 +984,24 @@ export default function DashboardPage() {
                 <p className="text-xs uppercase text-[var(--muted)]">Borderline / Cold</p>
                 <p className="mt-2 text-2xl font-semibold text-[var(--foreground)]">{summary.borderline}</p>
                 <p className="text-xs text-[var(--muted)]">Cold: {summary.cold}</p>
+              </article>
+              <article className="rounded-lg border border-[var(--border)] bg-[var(--surface)] p-4 shadow-sm transition-colors">
+                <p className="text-xs uppercase text-[var(--muted)]">AI Tokens · Cleaning</p>
+                <p className="mt-2 text-2xl font-semibold text-[var(--foreground)]">
+                  {tokenUsage.cleaning.totalTokens.toLocaleString()}
+                </p>
+                <p className="text-xs text-[var(--muted)]">
+                  Prompt {tokenUsage.cleaning.promptTokens.toLocaleString()} · Completion {tokenUsage.cleaning.completionTokens.toLocaleString()}
+                </p>
+              </article>
+              <article className="rounded-lg border border-[var(--border)] bg-[var(--surface)] p-4 shadow-sm transition-colors">
+                <p className="text-xs uppercase text-[var(--muted)]">AI Tokens · Scoring</p>
+                <p className="mt-2 text-2xl font-semibold text-[var(--foreground)]">
+                  {tokenUsage.scoring.totalTokens.toLocaleString()}
+                </p>
+                <p className="text-xs text-[var(--muted)]">
+                  Prompt {tokenUsage.scoring.promptTokens.toLocaleString()} · Completion {tokenUsage.scoring.completionTokens.toLocaleString()}
+                </p>
               </article>
             </section>
 

@@ -1,4 +1,4 @@
-import { callOpenRouter } from "../openrouter";
+import { callOpenRouter, type OpenRouterUsage } from "../openrouter";
 import { getEnv } from "../env";
 
 export type RawLeadRecord = Record<string, string>;
@@ -175,9 +175,14 @@ function truncate(value: string | undefined | null, limit: number): string | und
   return `${value.slice(0, limit)}…`;
 }
 
-async function runAiCleaner(base: CleanLead, enabled: boolean): Promise<CleanLead> {
+type CleanerResult = {
+  cleaned: CleanLead;
+  usage: OpenRouterUsage | null;
+};
+
+async function runAiCleaner(base: CleanLead, enabled: boolean): Promise<CleanerResult> {
   if (!enabled) {
-    return base;
+    return { cleaned: base, usage: null };
   }
 
   try {
@@ -192,7 +197,7 @@ async function runAiCleaner(base: CleanLead, enabled: boolean): Promise<CleanLea
       notes: truncate(base.notes, 300)
     };
 
-    const response = await callOpenRouter([
+    const { response, usage } = await callOpenRouter([
       {
         role: "system",
         content:
@@ -206,28 +211,38 @@ async function runAiCleaner(base: CleanLead, enabled: boolean): Promise<CleanLea
       }
     ]);
 
+    const cleanedResponse = response as Record<string, string | undefined>;
+
     return {
-      ...base,
-      company: response.company ?? base.company,
-      website: response.website || base.website,
-      email: response.email || base.email,
-      phone: response.phone || base.phone,
-      maps_url: response.maps_url || base.maps_url,
-      location: base.location,
-      industry: base.industry,
-      notes: base.notes
+      cleaned: {
+        ...base,
+        company: cleanedResponse.company ?? base.company,
+        website: cleanedResponse.website || base.website,
+        email: cleanedResponse.email || base.email,
+        phone: cleanedResponse.phone || base.phone,
+        maps_url: cleanedResponse.maps_url || base.maps_url,
+        location: base.location,
+        industry: base.industry,
+        notes: base.notes
+      },
+      usage
     };
   } catch (error) {
     console.error("AI cleaner failed", error);
-    return base;
+    return { cleaned: base, usage: null };
   }
 }
+
+export type CleanLeadResult = {
+  cleaned: CleanLead;
+  usage: OpenRouterUsage | null;
+};
 
 export async function cleanLeadRecord(
   record: RawLeadRecord,
   fallbackLeadId: string,
   options?: { useAi?: boolean }
-): Promise<CleanLead> {
+): Promise<CleanLeadResult> {
   const leadId = record.lead_id || record.id || fallbackLeadId;
   const company = record.company_name || record.company || record.account || "Unknown Company";
 
@@ -264,7 +279,7 @@ export async function cleanLeadRecord(
 
   const { OPENROUTER_API_KEY } = getEnv();
   if (!OPENROUTER_API_KEY) {
-    return base;
+    return { cleaned: base, usage: null };
   }
 
   const useAi = options?.useAi ?? process.env.AI_CLEANER_ENABLED === "true";

@@ -5,7 +5,16 @@ export type OpenRouterMessage = {
   content: string;
 };
 
-export async function callOpenRouter(messages: OpenRouterMessage[]) {
+export type OpenRouterUsage = {
+  promptTokens: number;
+  completionTokens: number;
+  totalTokens: number;
+};
+
+export async function callOpenRouter(messages: OpenRouterMessage[]): Promise<{
+  response: unknown;
+  usage: OpenRouterUsage | null;
+}> {
   const { OPENROUTER_API_KEY, OPENROUTER_BASE_URL, OPENROUTER_MODEL } = getEnv();
 
   const response = await fetch(`${OPENROUTER_BASE_URL}/chat/completions`, {
@@ -33,13 +42,20 @@ export async function callOpenRouter(messages: OpenRouterMessage[]) {
 
   const payload = await response.json();
   const content = payload?.choices?.[0]?.message?.content;
+  const usage: OpenRouterUsage | null = payload?.usage
+    ? {
+        promptTokens: payload.usage.prompt_tokens ?? 0,
+        completionTokens: payload.usage.completion_tokens ?? 0,
+        totalTokens: payload.usage.total_tokens ?? 0
+      }
+    : null;
 
   if (!content) {
     throw new Error("OpenRouter returned an empty response.");
   }
 
   try {
-    return JSON.parse(content);
+    return { response: JSON.parse(content), usage };
   } catch {
     throw new Error(`Unable to parse OpenRouter JSON response: ${content}`);
   }

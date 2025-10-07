@@ -1,7 +1,7 @@
 
 import type { SupabaseClient } from "@supabase/supabase-js";
 
-import type { LeadInput, LeadScoreApiResponse } from "@/lib/types";
+import type { LeadInput, LeadScoreApiResponse, TokenUsageSummary } from "@/lib/types";
 import { getSupabaseAdminClient } from "@/lib/supabase";
 import { LeadScoringAbortError, scoreLeads, type ScoreLeadOptions } from "@/lib/scoreLeads";
 
@@ -17,6 +17,7 @@ type JobMetadata = {
     maxConcurrency?: number;
   };
   supabase?: LeadScoreApiResponse["supabase"];
+  usage?: TokenUsageSummary | null;
 };
 
 type LeadJobRow = {
@@ -118,6 +119,7 @@ export type JobSnapshot = {
   updatedAt: number;
   error?: string;
   supabase: LeadScoreApiResponse["supabase"];
+  usage: TokenUsageSummary | null;
   results: LeadScoreApiResponse["leads"];
 };
 
@@ -143,6 +145,7 @@ function toSnapshot(job: LeadJobRow, items: LeadJobItemRow[]): JobSnapshot {
     .map((item) => item.result as LeadScoreApiResponse["leads"][number]);
 
   const supabaseResult = (job.metadata?.supabase ?? null) as JobSnapshot["supabase"];
+  const usage = job.metadata?.usage ?? null;
 
   return {
     id: job.id,
@@ -153,6 +156,7 @@ function toSnapshot(job: LeadJobRow, items: LeadJobItemRow[]): JobSnapshot {
     updatedAt: new Date(job.updated_at).getTime(),
     error: job.error ?? undefined,
     supabase: supabaseResult,
+    usage,
     results
   };
 }
@@ -261,6 +265,7 @@ async function processLeadJob(jobId: string) {
       useCleaner: options.useCleaner,
       saveToSupabase: options.saveToSupabase,
       userId: job.user_id,
+      jobId: job.id,
       maxConcurrency: options.maxConcurrency,
       signal: controller.signal,
       onProgress: async ({ lead, result: leadResult }) => {
@@ -323,6 +328,7 @@ async function processLeadJob(jobId: string) {
       maxConcurrency: options.maxConcurrency
     };
     metadata.supabase = result.supabase ?? null;
+    metadata.usage = result.usage ?? null;
 
     const { error: completeError } = await client
       .from("lead_jobs")

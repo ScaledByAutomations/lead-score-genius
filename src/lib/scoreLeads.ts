@@ -1,11 +1,25 @@
-import { cleanLeadRecord } from "@/lib/ai/clean";
-import { scoreLeadWithModel, selectWeights } from "@/lib/ai/scoring";
+import { cleanLeadRecord, type CleanLeadResult } from "@/lib/ai/clean";
+import { scoreLeadBatchWithModel, selectWeights } from "@/lib/ai/scoring";
 import { analyzeWebsite } from "@/lib/enrich/website";
 import { fetchGoogleMapsReviews } from "@/lib/reviews";
-import { getSupabaseAdminClient, saveLeadRunsToSupabase } from "@/lib/supabase";
-import type { LeadInput, LeadScoreApiResponse } from "@/lib/types";
+import {
+  getSupabaseAdminClient,
+  logTokenUsage,
+  saveLeadRunsToSupabase,
+  type TokenUsageEntry
+} from "@/lib/supabase";
+import type {
+  LeadInput,
+  LeadScoreApiResponse,
+  LeadScoreResponse,
+  TokenUsageSummary
+} from "@/lib/types";
+import { randomUUID } from "crypto";
 
 const DEFAULT_MAX_CONCURRENCY = Number(process.env.MAX_CONCURRENCY ?? "5");
+const SCORE_BATCH_SIZE = Math.max(Number(process.env.SCORE_BATCH_SIZE ?? "5"), 1);
+const SCORE_BATCH_FLUSH_MS = Math.max(Number(process.env.SCORE_BATCH_FLUSH_MS ?? "50"), 0);
+const TOKEN_USAGE_FLUSH_SIZE = Math.max(Number(process.env.TOKEN_USAGE_FLUSH_SIZE ?? "25"), 1);
 
 export class LeadScoringAbortError extends Error {
   constructor(message = "Lead scoring aborted") {
@@ -47,10 +61,31 @@ const normalizeUrlKey = (value?: string | null) => {
   }
 };
 
+const createUsageSummary = () => ({
+  cleaning: { promptTokens: 0, completionTokens: 0, totalTokens: 0 },
+  scoring: { promptTokens: 0, completionTokens: 0, totalTokens: 0 }
+});
+
+const splitTokens = (total: number, count: number) => {
+  if (count <= 0) {
+    return [];
+  }
+  const base = Math.floor(total / count);
+  let remainder = total - base * count;
+  return Array.from({ length: count }, () => {
+    const value = base + (remainder > 0 ? 1 : 0);
+    if (remainder > 0) {
+      remainder -= 1;
+    }
+    return value;
+  });
+};
+
 export type ScoreLeadOptions = {
   useCleaner?: boolean;
   saveToSupabase?: boolean;
   userId?: string | null;
+  jobId?: string | null;
   maxConcurrency?: number;
   signal?: AbortSignal | null;
   onProgress?: (payload: {
@@ -61,41 +96,153 @@ export type ScoreLeadOptions = {
   }) => void | Promise<void>;
 };
 
+type PendingScoreRequest = {
+  lead: LeadInput;
+  cleaned: CleanLeadResult["cleaned"];
+  reviews: Awaited<ReturnType<typeof fetchGoogleMapsReviews>>;
+  website: Awaited<ReturnType<typeof analyzeWebsite>>;
+  resolve: (score: LeadScoreResponse) => void;
+  reject: (error: unknown) => void;
+};
+
 export async function scoreLeads(
   leads: LeadInput[],
   options: ScoreLeadOptions = {}
 ): Promise<{
   leads: LeadScoreApiResponse["leads"];
   supabase?: LeadScoreApiResponse["supabase"];
+  usage: TokenUsageSummary;
 }> {
   if (!Array.isArray(leads) || leads.length === 0) {
-    return { leads: [], supabase: null };
+    return { leads: [], supabase: null, usage: createUsageSummary() };
   }
 
   const useCleaner = options.useCleaner !== false;
   const saveToSupabase = options.saveToSupabase === true;
   const maxConcurrency = options.maxConcurrency ?? DEFAULT_MAX_CONCURRENCY;
   const abortSignal = options.signal ?? null;
+  const jobId = options.jobId ?? null;
 
-  const batches: LeadScoreApiResponse["leads"] = [];
-  const orderMap = new Map(leads.map((lead, index) => [lead.lead_id, index]));
-  const reviewPromiseCache = new Map<string, Promise<Awaited<ReturnType<typeof fetchGoogleMapsReviews>>>>();
+  const usageSummary: TokenUsageSummary = createUsageSummary();
+  const pendingUsageLogs: TokenUsageEntry[] = [];
+
+  const addUsageToSummary = (category: "cleaning" | "scoring", usage: { promptTokens: number; completionTokens: number; totalTokens: number }) => {
+    usageSummary[category].promptTokens += usage.promptTokens;
+    usageSummary[category].completionTokens += usage.completionTokens;
+    usageSummary[category].totalTokens += usage.totalTokens;
+  };
+
+  const flushUsageLogs = async (force = false) => {
+    if (!force && pendingUsageLogs.length < TOKEN_USAGE_FLUSH_SIZE) {
+      return;
+    }
+    const entries = pendingUsageLogs.splice(0, pendingUsageLogs.length);
+    if (entries.length > 0) {
+      await logTokenUsage(entries);
+    }
+  };
+
+  const recordUsageEntry = async (entry: TokenUsageEntry) => {
+    pendingUsageLogs.push(entry);
+    if (pendingUsageLogs.length >= TOKEN_USAGE_FLUSH_SIZE) {
+      await flushUsageLogs();
+    }
+  };
+
   let aborted = abortSignal?.aborted ?? false;
-
   const handleAbort = () => {
     aborted = true;
   };
-
   abortSignal?.addEventListener("abort", handleAbort);
+
+  const reviewPromiseCache = new Map<string, Promise<Awaited<ReturnType<typeof fetchGoogleMapsReviews>>>>();
+
+  const scoringQueue: PendingScoreRequest[] = [];
+  let scoringTimer: NodeJS.Timeout | null = null;
+  let scoringChain: Promise<void> = Promise.resolve();
+
+  const processScoreChunk = async (chunk: PendingScoreRequest[]) => {
+    try {
+      const batchItems = chunk.map((item) => ({
+        lead: item.cleaned,
+        reviews: item.reviews,
+        website: item.website
+      }));
+      const { scores, usage } = await scoreLeadBatchWithModel(batchItems);
+      scores.forEach((score, index) => {
+        chunk[index].resolve(score);
+      });
+      if (usage) {
+        addUsageToSummary("scoring", usage);
+        const batchId = randomUUID();
+        const promptShares = splitTokens(usage.promptTokens, chunk.length);
+        const completionShares = splitTokens(usage.completionTokens, chunk.length);
+        const totalShares = splitTokens(usage.totalTokens, chunk.length);
+        for (let i = 0; i < chunk.length; i += 1) {
+          await recordUsageEntry({
+            lead_id: chunk[i].cleaned.lead_id,
+            job_id: jobId ?? null,
+            category: "score",
+            prompt_tokens: promptShares[i],
+            completion_tokens: completionShares[i],
+            total_tokens: totalShares[i],
+            batch_id: batchId
+          });
+        }
+      }
+    } catch (error) {
+      chunk.forEach((item) => item.reject(error));
+    }
+  };
+
+  const queueChunk = (chunk: PendingScoreRequest[]) => {
+    scoringChain = scoringChain.then(() => processScoreChunk(chunk));
+  };
+
+  const scheduleScoreFlush = () => {
+    while (scoringQueue.length >= SCORE_BATCH_SIZE) {
+      const chunk = scoringQueue.splice(0, SCORE_BATCH_SIZE);
+      queueChunk(chunk);
+    }
+    if (scoringQueue.length > 0 && !scoringTimer) {
+      scoringTimer = setTimeout(() => {
+        scoringTimer = null;
+        if (scoringQueue.length > 0) {
+          const chunk = scoringQueue.splice(0, scoringQueue.length);
+          queueChunk(chunk);
+        }
+      }, SCORE_BATCH_FLUSH_MS);
+    }
+  };
+
+  const enqueueScoreRequest = (request: Omit<PendingScoreRequest, "resolve" | "reject">) =>
+    new Promise<LeadScoreResponse>((resolve, reject) => {
+      scoringQueue.push({ ...request, resolve, reject });
+      scheduleScoreFlush();
+    });
+
+  const drainScoringQueue = async () => {
+    if (scoringTimer) {
+      clearTimeout(scoringTimer);
+      scoringTimer = null;
+    }
+    if (scoringQueue.length > 0) {
+      const chunk = scoringQueue.splice(0, scoringQueue.length);
+      queueChunk(chunk);
+    }
+    await scoringChain;
+  };
+
+  const batches: LeadScoreApiResponse["leads"] = [];
+  const orderMap = new Map(leads.map((lead, index) => [lead.lead_id, index]));
+  const queue = [...leads];
+  const workers: Promise<void>[] = [];
 
   const ensureNotAborted = () => {
     if (aborted) {
       throw new LeadScoringAbortError();
     }
   };
-
-  const queue = [...leads];
-  const workers: Promise<void>[] = [];
 
   const processLead = async (lead: LeadInput) => {
     const rawRecord = lead.normalized ?? {};
@@ -112,7 +259,8 @@ export async function scoreLeads(
 
     ensureNotAborted();
 
-    let cleaned: Awaited<ReturnType<typeof cleanLeadRecord>> | null = null;
+    let cleanResult: CleanLeadResult | null = null;
+    let cleaned: CleanLeadResult["cleaned"] | null = null;
     let reviewSnapshot: Awaited<ReturnType<typeof fetchGoogleMapsReviews>> = {
       averageRating: null,
       reviewCount: null,
@@ -125,8 +273,20 @@ export async function scoreLeads(
 
     try {
       const cleanStart = Date.now();
-      cleaned = await cleanLeadRecord(rawRecord, lead.lead_id, { useAi: useCleaner });
+      cleanResult = await cleanLeadRecord(rawRecord, lead.lead_id, { useAi: useCleaner });
       cleanDuration = Date.now() - cleanStart;
+      cleaned = cleanResult.cleaned;
+      if (cleanResult.usage) {
+        addUsageToSummary("cleaning", cleanResult.usage);
+        await recordUsageEntry({
+          lead_id: cleaned.lead_id,
+          job_id: jobId ?? null,
+          category: "clean",
+          prompt_tokens: cleanResult.usage.promptTokens,
+          completion_tokens: cleanResult.usage.completionTokens,
+          total_tokens: cleanResult.usage.totalTokens
+        });
+      }
 
       ensureNotAborted();
 
@@ -221,12 +381,17 @@ export async function scoreLeads(
       ensureNotAborted();
 
       scoreStart = Date.now();
-      const score = await scoreLeadWithModel(cleaned, reviewSnapshot, websiteSignals);
+      const modelScore = await enqueueScoreRequest({
+        lead,
+        cleaned,
+        reviews: reviewSnapshot,
+        website: websiteSignals
+      });
       scoreDuration = Date.now() - scoreStart;
 
       const result = {
         lead,
-        score,
+        score: modelScore,
         enriched: {
           cleaned,
           reviews: reviewSnapshot,
@@ -373,6 +538,9 @@ export async function scoreLeads(
       }
     }
 
+    await drainScoringQueue();
+    await flushUsageLogs(true);
+
     if (aborted) {
       await Promise.allSettled(workers);
       throw new LeadScoringAbortError();
@@ -411,8 +579,10 @@ export async function scoreLeads(
       supabaseResult = { saved: false, count: 0, requested: true };
     }
 
-    return { leads: batches, supabase: supabaseResult };
+    return { leads: batches, supabase: supabaseResult, usage: usageSummary };
   } finally {
     abortSignal?.removeEventListener("abort", handleAbort);
+    await drainScoringQueue();
+    await flushUsageLogs(true);
   }
 }

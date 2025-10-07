@@ -58,3 +58,41 @@ export async function saveLeadRunsToSupabase(
 
   return { saved: true, count: rows.length };
 }
+
+export type TokenUsageEntry = {
+  lead_id: string;
+  job_id?: string | null;
+  category: "clean" | "score";
+  prompt_tokens: number;
+  completion_tokens: number;
+  total_tokens: number;
+  batch_id?: string | null;
+};
+
+export async function logTokenUsage(entries: TokenUsageEntry[]): Promise<void> {
+  if (!entries.length) {
+    return;
+  }
+
+  const client = getSupabaseAdminClient();
+  if (!client) {
+    console.warn("Supabase client unavailable; skipping token usage logging");
+    return;
+  }
+
+  const payload = entries.map((entry) => ({
+    lead_id: entry.lead_id,
+    job_id: entry.job_id ?? null,
+    category: entry.category,
+    prompt_tokens: entry.prompt_tokens,
+    completion_tokens: entry.completion_tokens,
+    total_tokens: entry.total_tokens,
+    batch_id: entry.batch_id ?? null,
+    created_at: new Date().toISOString()
+  }));
+
+  const { error } = await client.from("lead_token_usage").insert(payload);
+  if (error) {
+    console.error("Failed to log token usage", error);
+  }
+}

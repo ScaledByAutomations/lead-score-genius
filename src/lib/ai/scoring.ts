@@ -1,4 +1,4 @@
-import { callOpenRouter } from "../openrouter";
+import { callOpenRouter, type OpenRouterUsage } from "../openrouter";
 import type { CleanLead } from "./clean";
 import type { ReviewSnapshot } from "../types";
 import type { WebsiteSignals } from "../enrich/website";
@@ -139,14 +139,14 @@ export function interpretScore(score: number): LeadScoreResponse["interpretation
   return "Cold Dead";
 }
 
-export async function scoreLeadWithModel(
-  lead: CleanLead,
-  reviews: ReviewSnapshot,
-  website: WebsiteSignals | null
-): Promise<LeadScoreResponse> {
-  const weights = selectWeights(lead.industry);
+type BatchItem = {
+  lead: CleanLead;
+  reviews: ReviewSnapshot;
+  website: WebsiteSignals | null;
+};
 
-  const leadPayload = {
+function buildLeadPayload(lead: CleanLead) {
+  return {
     lead_id: lead.lead_id,
     company: lead.company,
     industry: lead.industry ?? null,
@@ -155,14 +155,18 @@ export async function scoreLeadWithModel(
     phone: lead.phone ?? null,
     years_in_business: lead.years_in_business ?? null
   };
+}
 
-  const reviewsPayload = {
+function buildReviewsPayload(reviews: ReviewSnapshot) {
+  return {
     averageRating: reviews.averageRating,
     reviewCount: reviews.reviewCount,
     method: reviews.method ?? null
   };
+}
 
-  const websitePayload = website
+function buildWebsitePayload(website: WebsiteSignals | null) {
+  return website
     ? {
         url: website.url,
         finalScore: website.finalScore,
@@ -170,37 +174,15 @@ export async function scoreLeadWithModel(
         bonuses: website.bonuses
       }
     : null;
+}
 
-  const messages = [
-    {
-      role: "system" as const,
-      content: `You are an AI lead scoring engine. Produce JSON only. Adhere strictly to the scoring matrix.
-Return an object with keys lead_id, industry, weights_applied, scores, reasoning, final_score, interpretation.
-All factor scores must be integers 0-10. Provide detailed reasoning citing evidence provided.
-Do NOT perform weighted arithmetic; the caller will recompute final scores.
-If data is missing, set score to 0 and explain.
-`
-    },
-    {
-      role: "user" as const,
-      content: JSON.stringify({
-        lead: leadPayload,
-        reviews: reviewsPayload,
-        website: websitePayload,
-        weights,
-        guidance: {
-          website_activity: "Use website.finalScore when provided. Mention method and bonuses in reasoning.",
-          reviews: "Use provided rating/review count. If null, score 0 and explain scraping attempts.",
-          years_in_business: "Map years_in_business to 10/>5, 5/2-4, 2/<1", 
-          revenue_proxies: "Estimate from pricing signals, review volume, industry context.",
-          industry_fit: "Apply core alignment and bonus rules; note any patriotic/outdoor cues if present."
-        }
-      })
-    }
-  ];
-
-  const raw = (await callOpenRouter(messages)) as LeadScoreResponse;
-
+function sanitizeModelScore(
+  raw: LeadScoreResponse,
+  lead: CleanLead,
+  reviews: ReviewSnapshot,
+  website: WebsiteSignals | null,
+  weights: WeightSet
+): LeadScoreResponse {
   const deterministicReviewScore = computeDeterministicReviewScore(reviews);
   const modelReviewScore = clampScore(raw.scores?.reviews?.score ?? deterministicReviewScore);
 
@@ -239,4 +221,75 @@ If data is missing, set score to 0 and explain.
   }
 
   return sanitized;
+}
+
+type BatchResult = {
+  scores: LeadScoreResponse[];
+  usage: OpenRouterUsage | null;
+};
+
+export async function scoreLeadBatchWithModel(items: BatchItem[]): Promise<BatchResult> {
+  if (items.length === 0) {
+    return { scores: [], usage: null };
+  }
+
+  const payload = items.map(({ lead, reviews, website }) => ({
+    lead: buildLeadPayload(lead),
+    reviews: buildReviewsPayload(reviews),
+    website: buildWebsitePayload(website),
+    weights: selectWeights(lead.industry)
+  }));
+
+  const messages = [
+    {
+      role: "system" as const,
+      content: `You are an AI lead scoring engine. Produce JSON only. For each element in the 'leads' array, return an array named "results" with the same order. Each object must include lead_id, industry, weights_applied, scores, reasoning, final_score, interpretation. All factor scores must be integers 0-10. Do NOT compute weighted sums; the caller will recompute. If data is missing, set score to 0 and explain.`
+    },
+    {
+      role: "user" as const,
+      content: JSON.stringify({
+        leads: payload,
+        guidance: {
+          website_activity: "Use website.finalScore when provided. Mention method and bonuses in reasoning.",
+          reviews: "Use provided rating/review count. If null, score 0 and explain scraping attempts.",
+          years_in_business: "Map years_in_business to 10/>5, 5/2-4, 2/<1",
+          revenue_proxies: "Estimate from pricing signals, review volume, industry context.",
+          industry_fit: "Apply core alignment and bonus rules; note any patriotic/outdoor cues if present."
+        }
+      })
+    }
+  ];
+
+  const { response, usage } = await callOpenRouter(messages);
+
+  const parsed = Array.isArray((response as { results?: unknown[] })?.results)
+    ? (response as { results: unknown[] }).results
+    : Array.isArray(response)
+      ? (response as unknown[])
+      : null;
+
+  if (!parsed || parsed.length !== items.length) {
+    throw new Error("Model returned unexpected batch response format");
+  }
+
+  const scores = parsed.map((raw, index) =>
+    sanitizeModelScore(
+      raw as LeadScoreResponse,
+      items[index].lead,
+      items[index].reviews,
+      items[index].website,
+      payload[index].weights
+    )
+  );
+
+  return { scores, usage };
+}
+
+export async function scoreLeadWithModel(
+  lead: CleanLead,
+  reviews: ReviewSnapshot,
+  website: WebsiteSignals | null
+): Promise<LeadScoreResponse> {
+  const { scores } = await scoreLeadBatchWithModel([{ lead, reviews, website }]);
+  return scores[0];
 }
