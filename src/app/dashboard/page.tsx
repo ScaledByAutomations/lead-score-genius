@@ -194,6 +194,8 @@ export default function DashboardPage() {
   const router = useRouter();
   const supabase = useMemo(() => getSupabaseBrowserClient(), []);
 
+  const ACTIVE_JOB_STORAGE_KEY = "lead-score-genius-active-job-id";
+
   const [authChecked, setAuthChecked] = useState(false);
   const [currentUserEmail, setCurrentUserEmail] = useState<string | null>(null);
   const [currentUserId, setCurrentUserId] = useState<string | null>(null);
@@ -316,6 +318,26 @@ export default function DashboardPage() {
       setAutoSaveToSupabase(false);
     }
   }, [supabaseStatus, autoSaveToSupabase]);
+
+  useEffect(() => {
+    if (!authChecked) {
+      return;
+    }
+
+    if (jobId) {
+      return;
+    }
+
+    if (typeof window === "undefined") {
+      return;
+    }
+
+    const storedJobId = window.localStorage.getItem(ACTIVE_JOB_STORAGE_KEY);
+    if (storedJobId) {
+      setJobId(storedJobId);
+      setProcessing(true);
+    }
+  }, [authChecked, jobId]);
 
   const handleSignOut = useCallback(async () => {
     await supabase.auth.signOut();
@@ -477,6 +499,9 @@ export default function DashboardPage() {
     setError(null);
     setActiveJob(null);
     setJobId(null);
+    if (typeof window !== "undefined") {
+      window.localStorage.removeItem(ACTIVE_JOB_STORAGE_KEY);
+    }
     const willAutoSave = autoSaveToSupabase && supabaseStatus === "connected";
     if (willAutoSave) {
       setSaveState("saving");
@@ -516,6 +541,9 @@ export default function DashboardPage() {
         setJobId(data.job.id);
         setActiveJob(data.job);
         setScoredLeads(data.job.results ?? []);
+        if (typeof window !== "undefined") {
+          window.localStorage.setItem(ACTIVE_JOB_STORAGE_KEY, data.job.id);
+        }
         return;
       }
 
@@ -594,6 +622,9 @@ export default function DashboardPage() {
       setProcessing(false);
       setJobId(null);
       setError(data.job.error ?? "Lead scoring run cancelled.");
+      if (typeof window !== "undefined") {
+        window.localStorage.removeItem(ACTIVE_JOB_STORAGE_KEY);
+      }
 
       if (data.job.supabase?.requested) {
         setSaveState("error");
@@ -672,6 +703,17 @@ export default function DashboardPage() {
         setActiveJob(data.job);
         setScoredLeads(data.job.results ?? []);
 
+        if (data.job.status === "completed" || data.job.status === "failed") {
+          if (typeof window !== "undefined") {
+            window.localStorage.removeItem(ACTIVE_JOB_STORAGE_KEY);
+          }
+        } else {
+          setProcessing(true);
+          if (typeof window !== "undefined") {
+            window.localStorage.setItem(ACTIVE_JOB_STORAGE_KEY, data.job.id);
+          }
+        }
+
         if (data.job.supabase?.requested) {
           if (data.job.supabase.saved) {
             setSaveState("saved");
@@ -685,6 +727,9 @@ export default function DashboardPage() {
         if (data.job.status === "completed") {
           setProcessing(false);
           setJobId(null);
+          if (typeof window !== "undefined") {
+            window.localStorage.removeItem(ACTIVE_JOB_STORAGE_KEY);
+          }
         } else if (data.job.status === "failed") {
           setProcessing(false);
           setJobId(null);
@@ -692,6 +737,9 @@ export default function DashboardPage() {
           if (data.job.supabase?.requested) {
             setSaveState("error");
             setSaveError(data.job.error ?? "Supabase save failed.");
+          }
+          if (typeof window !== "undefined") {
+            window.localStorage.removeItem(ACTIVE_JOB_STORAGE_KEY);
           }
         }
       } catch (pollError) {
@@ -703,6 +751,9 @@ export default function DashboardPage() {
         setActiveJob(null);
         setError(pollError instanceof Error ? pollError.message : "Unable to poll job status.");
         setSaveState((prev) => (prev === "saving" ? "error" : prev));
+        if (typeof window !== "undefined") {
+          window.localStorage.removeItem(ACTIVE_JOB_STORAGE_KEY);
+        }
       }
     };
 
