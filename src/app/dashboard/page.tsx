@@ -865,6 +865,12 @@ export default function DashboardPage() {
                   Saved leads
                 </a>
                 <a
+                  href="/dashboard/usage"
+                  className="rounded-md border border-[var(--border)] bg-[var(--surface)] px-3 py-1 text-xs font-medium text-[var(--foreground)] shadow-sm transition hover:border-[var(--accent)] hover:bg-[var(--surface-subtle)]"
+                >
+                  Token usage
+                </a>
+                <a
                   href="/dashboard/account"
                   className="rounded-md border border-[var(--border)] bg-[var(--surface)] px-3 py-1 text-xs font-medium text-[var(--foreground)] shadow-sm transition hover:border-[var(--accent)] hover:bg-[var(--surface-subtle)]"
                 >
