@@ -214,12 +214,6 @@ export async function getMapsSnapshot(
     cached.expiresAt > Date.now() &&
     (cached.snapshot.averageRating !== null || cached.snapshot.reviewCount !== null)
   ) {
-    console.debug("maps snapshot cache hit", {
-      query,
-      providedUrl,
-      companyName,
-      method: cached.snapshot.method
-    });
     return cached.snapshot;
   }
 
@@ -324,11 +318,6 @@ export async function getMapsSnapshot(
 
     headlessSnapshot = sanitizeSnapshot(headless.url, rating, reviewCount, methodLabel);
     if (matchesIdentity && (headlessSnapshot.averageRating !== null || headlessSnapshot.reviewCount !== null)) {
-      console.info("maps snapshot headless success", {
-        query,
-        companyName,
-        method: headlessSnapshot.method
-      });
       cache.set(cacheKey, { snapshot: headlessSnapshot, expiresAt: Date.now() + MAPS_CACHE_TTL_MS });
       return headlessSnapshot;
     }
@@ -337,11 +326,6 @@ export async function getMapsSnapshot(
   if (resolvedProvidedUrl && resolvedProvidedUrl.includes("/maps/place")) {
     const snapshot = await attemptPlace(resolvedProvidedUrl, "provided");
     if (snapshot && (snapshot.averageRating !== null || snapshot.reviewCount !== null)) {
-      console.info("maps snapshot provided success", {
-        query,
-        companyName,
-        method: snapshot.method
-      });
       cache.set(cacheKey, { snapshot, expiresAt: Date.now() + MAPS_CACHE_TTL_MS });
       return snapshot;
     }
@@ -353,11 +337,6 @@ export async function getMapsSnapshot(
     if (extracted) {
       const snapshot = await attemptPlace(extracted, "serp_place");
       if (snapshot && (snapshot.averageRating !== null || snapshot.reviewCount !== null)) {
-        console.info("maps snapshot serp success", {
-          query,
-          companyName,
-          method: snapshot.method
-        });
         cache.set(cacheKey, { snapshot, expiresAt: Date.now() + MAPS_CACHE_TTL_MS });
         return snapshot;
       }
@@ -368,11 +347,6 @@ export async function getMapsSnapshot(
     if (!resolvedProvidedUrl || resolvedProvidedUrl !== apiResolvedUrl) {
       const snapshot = await attemptPlace(apiResolvedUrl, "api_query");
       if (snapshot && (snapshot.averageRating !== null || snapshot.reviewCount !== null)) {
-        console.info("maps snapshot api success", {
-          query,
-          companyName,
-          method: snapshot.method
-        });
         cache.set(cacheKey, { snapshot, expiresAt: Date.now() + MAPS_CACHE_TTL_MS });
         return snapshot;
       }
@@ -416,13 +390,6 @@ export async function getMapsSnapshot(
   );
 
   if (fallback.averageRating === null && fallback.reviewCount === null) {
-    console.warn("maps snapshot miss", {
-      query,
-      companyName,
-      providedUrl,
-      methods: methodsTried,
-      fallback: fallbackMethod
-    });
     return {
       averageRating: null,
       reviewCount: null,
@@ -430,14 +397,6 @@ export async function getMapsSnapshot(
       method: "not_found"
     } satisfies ReviewSnapshot & { method: string };
   }
-
-  console.info("maps snapshot fallback", {
-    query,
-    companyName,
-    providedUrl,
-    methods: methodsTried,
-    fallback: fallbackMethod
-  });
 
   return fallback;
 }
@@ -482,32 +441,14 @@ async function fetchViaJina(
         .slice(Math.max(0, index - 250), Math.min(text.length, index + match[0].length + 250))
         .replace(/\s+/g, " ")
         .trim();
-      const prefix = text.slice(Math.max(0, index - 15), index);
-      const suffix = text.slice(index + match[0].length, Math.min(text.length, index + match[0].length + 20));
-      const rawRating = Number(match[1]);
-      const rawReviewCount = Number(match[2].replace(/,/g, ""));
-      if (!Number.isFinite(rawRating) || !Number.isFinite(rawReviewCount)) {
-        return null;
-      }
-      const looksLikePhone =
-        /\+\s*\d/.test(prefix) ||
-        /[-]\s*\d/.test(suffix) ||
-        /phone|call|tel/i.test(snippet);
-
-      if (looksLikePhone) {
-        console.debug("maps jina candidate skipped phone context", {
-          query,
-          snippet
-        });
-        return null;
-      }
-
+      const rating = Number(match[1]);
+      const reviewCount = Number(match[2].replace(/,/g, ""));
       return {
-        rating: rawRating,
-        reviewCount: rawReviewCount,
+        rating,
+        reviewCount: Number.isFinite(reviewCount) ? reviewCount : null,
         snippet
       };
-    }).filter((candidate): candidate is { rating: number; reviewCount: number; snippet: string } => candidate !== null);
+    });
 
     console.log("maps jina candidates", {
       query,
@@ -518,20 +459,14 @@ async function fetchViaJina(
     const scored = candidates
       .map((candidate) => {
         const normalizedSnippet = candidate.snippet.toLowerCase();
-        if (!/reviews?/i.test(candidate.snippet)) {
-          return null;
-        }
         const matchedTokens = matchTokens.filter((token) => normalizedSnippet.includes(token));
         const identityMatches = requiredTokens.length > 0
           ? requiredTokens.filter((token) => normalizedSnippet.includes(token))
           : matchedTokens;
         const primaryMatches = primaryTokens.filter((token) => normalizedSnippet.includes(token));
         const tokenScore = matchedTokens.length + primaryMatches.length;
-        const hasFiveStarIcon = /\u2605|⭐|★★★★★/.test(candidate.snippet);
-        const isFiveStarText = /5\s*★|5\.0\s*out of 5/i.test(candidate.snippet);
-        const looseMatchThreshold = matchTokens.length >= 3 ? 2 : 1;
         const hasIdentityMatch = requiredTokens.length === 0
-          ? matchedTokens.length >= looseMatchThreshold
+          ? matchedTokens.length > 0
           : identityMatches.length >= Math.max(1, minRequiredMatches);
         return {
           ...candidate,
@@ -539,33 +474,10 @@ async function fetchViaJina(
           identityMatches,
           primaryMatches,
           tokenScore,
-          hasIdentityMatch,
-          hasFiveStarIcon,
-          isFiveStarText
+          hasIdentityMatch
         };
       })
-      .filter((candidate): candidate is {
-        rating: number;
-        reviewCount: number;
-        snippet: string;
-        matchedTokens: string[];
-        identityMatches: string[];
-        primaryMatches: string[];
-        tokenScore: number;
-        hasIdentityMatch: boolean;
-        hasFiveStarIcon: boolean;
-        isFiveStarText: boolean;
-      } => candidate !== null)
-      .filter((candidate) => {
-        if (candidate.tokenScore === 0 || !candidate.hasIdentityMatch) {
-          return false;
-        }
-        const isFiveStarHighCount = candidate.rating === 5 && candidate.reviewCount >= 5;
-        if (isFiveStarHighCount && !candidate.hasFiveStarIcon && !candidate.isFiveStarText) {
-          return false;
-        }
-        return true;
-      })
+      .filter((candidate) => candidate.tokenScore > 0 && candidate.hasIdentityMatch)
       .sort((a, b) => {
         const identityDiff = (b.identityMatches?.length ?? 0) - (a.identityMatches?.length ?? 0);
         if (identityDiff !== 0) {
