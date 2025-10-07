@@ -212,6 +212,7 @@ export default function DashboardPage() {
   const [autoSaveToSupabase, setAutoSaveToSupabase] = useState(false);
   const [jobId, setJobId] = useState<string | null>(null);
   const [activeJob, setActiveJob] = useState<JobSnapshot | null>(null);
+  const [isCancelling, setIsCancelling] = useState(false);
 
   const statusBadgeClass = useMemo(() => {
     switch (supabaseStatus) {
@@ -566,6 +567,48 @@ export default function DashboardPage() {
     }
   }, [pendingLeads, useCleaner, autoSaveToSupabase, supabaseStatus, currentUserId]);
 
+  const handleCancelJob = useCallback(async () => {
+    if (!jobId) {
+      return;
+    }
+
+    setIsCancelling(true);
+    try {
+      const response = await fetch(`/api/score-leads/jobs/${jobId}/cancel`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify({ reason: "Cancelled from dashboard" })
+      });
+
+      if (!response.ok) {
+        const payload = await response.json().catch(() => ({}));
+        throw new Error(payload?.error ?? "Failed to cancel scoring job.");
+      }
+
+      const data = (await response.json()) as { job: JobSnapshot };
+
+      setActiveJob(data.job);
+      setScoredLeads(data.job.results ?? []);
+      setProcessing(false);
+      setJobId(null);
+      setError(data.job.error ?? "Lead scoring run cancelled.");
+
+      if (data.job.supabase?.requested) {
+        setSaveState("error");
+        setSaveError(data.job.error ?? "Supabase save cancelled.");
+      } else {
+        setSaveState("idle");
+        setSaveError(null);
+      }
+    } catch (cancelError) {
+      setError(cancelError instanceof Error ? cancelError.message : "Failed to cancel scoring job.");
+    } finally {
+      setIsCancelling(false);
+    }
+  }, [jobId]);
+
   const summary = useMemo(() => {
     if (scoredLeads.length === 0) {
       return {
@@ -784,6 +827,20 @@ export default function DashboardPage() {
                   : `Ready to score ${pendingLeads.length} lead${pendingLeads.length === 1 ? "" : "s"}. Adjust settings, then run scoring.`}
               </p>
               <div className="flex gap-2">
+                {processing && jobId ? (
+                  <button
+                    type="button"
+                    onClick={handleCancelJob}
+                    disabled={isCancelling}
+                    className={`rounded-md px-3 py-1.5 text-sm font-medium transition ${
+                      isCancelling
+                        ? "cursor-progress border border-[var(--border)] bg-[var(--surface-subtle)] text-[var(--muted)]"
+                        : "border border-[color:var(--error)] bg-[color:var(--error)]/10 text-[color:var(--error)] hover:bg-[color:var(--error)]/20"
+                    }`}
+                  >
+                    {isCancelling ? "Cancelling…" : "Cancel run"}
+                  </button>
+                ) : null}
                 <button
                   type="button"
                   onClick={handleScoreLeads}
