@@ -122,6 +122,7 @@ export async function scoreLeads(
   const maxConcurrency = options.maxConcurrency ?? DEFAULT_MAX_CONCURRENCY;
   const abortSignal = options.signal ?? null;
   const jobId = options.jobId ?? null;
+  const userId = options.userId ?? null;
 
   const usageSummary: TokenUsageSummary = createUsageSummary();
   const pendingUsageLogs: TokenUsageEntry[] = [];
@@ -186,7 +187,8 @@ export async function scoreLeads(
             prompt_tokens: promptShares[i],
             completion_tokens: completionShares[i],
             total_tokens: totalShares[i],
-            batch_id: batchId
+            batch_id: batchId,
+            user_id: userId
           });
         }
       }
@@ -284,7 +286,8 @@ export async function scoreLeads(
           category: "clean",
           prompt_tokens: cleanResult.usage.promptTokens,
           completion_tokens: cleanResult.usage.completionTokens,
-          total_tokens: cleanResult.usage.totalTokens
+          total_tokens: cleanResult.usage.totalTokens,
+          user_id: userId
         });
       }
 

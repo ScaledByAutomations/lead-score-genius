@@ -1,6 +1,10 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
+import { useRouter } from "next/navigation";
+
+import { DashboardNav } from "@/components/DashboardNav";
+import { getSupabaseBrowserClient } from "@/lib/supabaseBrowser";
 
 type UsageByDay = {
   date: string;
@@ -44,21 +48,80 @@ const STATUS_OPTIONS: Array<{ label: string; value: string }> = [
   { label: "Failed", value: "failed" }
 ];
 
+const ACTIVE_JOB_STORAGE_KEY = "lead-score-genius-active-job-id";
+const ACTIVE_JOB_OPTIONS_KEY = "lead-score-genius-active-job-options";
+
 export default function UsageDashboardPage() {
+  const router = useRouter();
+  const supabase = useMemo(() => getSupabaseBrowserClient(), []);
+
   const today = useMemo(() => new Date(), []);
   const sevenDaysAgo = useMemo(() => new Date(Date.now() - 7 * 24 * 60 * 60 * 1000), []);
+
+  const [authChecked, setAuthChecked] = useState(false);
+  const [currentEmail, setCurrentEmail] = useState<string | null>(null);
+  const [currentUserId, setCurrentUserId] = useState<string | null>(null);
 
   const [startDate, setStartDate] = useState<string>(toInputDate(sevenDaysAgo));
   const [endDate, setEndDate] = useState<string>(toInputDate(today));
   const [status, setStatus] = useState<string>("");
-  const [userIdFilter, setUserIdFilter] = useState<string>("");
   const [loading, setLoading] = useState<boolean>(false);
   const [error, setError] = useState<string | null>(null);
   const [usageByDay, setUsageByDay] = useState<UsageByDay[]>([]);
   const [jobs, setJobs] = useState<UsageJobRow[]>([]);
   const [totals, setTotals] = useState<{ cleaning: number; scoring: number }>({ cleaning: 0, scoring: 0 });
 
-  const fetchUsage = async () => {
+  useEffect(() => {
+    let cancelled = false;
+
+    supabase.auth.getSession().then(({ data }) => {
+      if (cancelled) {
+        return;
+      }
+      const session = data.session;
+      if (!session) {
+        router.replace("/");
+        return;
+      }
+      setCurrentEmail(session.user.email ?? null);
+      setCurrentUserId(session.user.id ?? null);
+      setAuthChecked(true);
+    });
+
+    const {
+      data: { subscription }
+    } = supabase.auth.onAuthStateChange((_event, session) => {
+      if (!session) {
+        setAuthChecked(false);
+        setCurrentEmail(null);
+        setCurrentUserId(null);
+        router.replace("/");
+        return;
+      }
+      setCurrentEmail(session.user.email ?? null);
+      setCurrentUserId(session.user.id ?? null);
+      setAuthChecked(true);
+    });
+
+    return () => {
+      cancelled = true;
+      subscription.unsubscribe();
+    };
+  }, [router, supabase]);
+
+  const handleSignOut = useCallback(async () => {
+    await supabase.auth.signOut();
+    if (typeof window !== "undefined") {
+      window.localStorage.removeItem(ACTIVE_JOB_STORAGE_KEY);
+      window.localStorage.removeItem(ACTIVE_JOB_OPTIONS_KEY);
+    }
+    router.replace("/");
+  }, [router, supabase]);
+
+  const fetchUsage = useCallback(async () => {
+    if (!currentUserId) {
+      return;
+    }
     setLoading(true);
     setError(null);
     try {
@@ -66,7 +129,7 @@ export default function UsageDashboardPage() {
       if (startDate) params.set("start", startDate);
       if (endDate) params.set("end", endDate);
       if (status) params.set("status", status);
-      if (userIdFilter.trim()) params.set("userId", userIdFilter.trim());
+      params.set("user_id", currentUserId);
 
       const response = await fetch(`/api/usage?${params.toString()}`);
       if (!response.ok) {
@@ -83,21 +146,40 @@ export default function UsageDashboardPage() {
     } finally {
       setLoading(false);
     }
-  };
+  }, [currentUserId, endDate, startDate, status]);
 
   useEffect(() => {
-    fetchUsage();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+    if (!authChecked || !currentUserId) {
+      return;
+    }
+    void fetchUsage();
+  }, [authChecked, currentUserId, fetchUsage]);
 
   const maxTokens = useMemo(() => {
     return usageByDay.reduce((acc, day) => Math.max(acc, day.cleaning + day.scoring), 0);
   }, [usageByDay]);
 
+  if (!authChecked) {
+    return (
+      <div className="flex min-h-screen items-center justify-center bg-[var(--background)] text-[var(--foreground)] transition-colors">
+        <p className="text-sm text-[var(--muted)]">Checking authentication…</p>
+      </div>
+    );
+  }
+
   return (
     <div className="min-h-screen bg-[var(--background)] text-[var(--foreground)] transition-colors">
       <main className="mx-auto flex max-w-5xl flex-col gap-8 px-6 py-10">
         <header className="space-y-4">
+          <div className="flex justify-end">
+            <DashboardNav onSignOut={handleSignOut}>
+              {currentEmail ? (
+                <span className="rounded-full border border-[var(--border)] bg-[var(--surface)] px-3 py-1 text-xs text-[var(--muted)]">
+                  Signed in as {currentEmail}
+                </span>
+              ) : null}
+            </DashboardNav>
+          </div>
           <div className="space-y-2">
             <h1 className="text-3xl font-semibold text-[var(--foreground)]">Token Usage</h1>
             <p className="text-sm text-[var(--muted)]">
@@ -107,7 +189,7 @@ export default function UsageDashboardPage() {
         </header>
 
         <section className="rounded-lg border border-[var(--border)] bg-[var(--surface)] p-6 shadow-sm transition-colors">
-          <div className="grid gap-4 sm:grid-cols-2 md:grid-cols-4">
+          <div className="grid gap-4 sm:grid-cols-2 md:grid-cols-3">
             <label className="flex flex-col gap-2 text-xs text-[var(--muted)]">
               Start date
               <input
@@ -142,21 +224,11 @@ export default function UsageDashboardPage() {
                 ))}
               </select>
             </label>
-            <label className="flex flex-col gap-2 text-xs text-[var(--muted)]">
-              User ID
-              <input
-                type="text"
-                value={userIdFilter}
-                placeholder="Filter by user ID"
-                onChange={(event) => setUserIdFilter(event.target.value)}
-                className="rounded-md border border-[var(--border)] bg-[var(--surface-subtle)] px-3 py-2 text-sm text-[var(--foreground)]"
-              />
-            </label>
           </div>
           <div className="mt-4 flex flex-wrap gap-3">
             <button
               type="button"
-              onClick={fetchUsage}
+              onClick={() => void fetchUsage()}
               className="rounded-md border border-[var(--accent)] bg-[var(--accent)] px-3 py-1.5 text-sm font-medium text-[var(--accent-contrast)] hover:bg-[var(--accent-hover)]"
             >
               Refresh

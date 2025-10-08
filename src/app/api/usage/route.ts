@@ -32,7 +32,12 @@ export async function GET(request: Request) {
   const startParam = url.searchParams.get("start");
   const endParam = url.searchParams.get("end");
   const statusParam = url.searchParams.get("status");
-  const userIdParam = url.searchParams.get("userId");
+  const userIdParam = url.searchParams.get("user_id") ?? url.searchParams.get("userId");
+  const userId = userIdParam && userIdParam.trim() !== "" ? userIdParam.trim() : null;
+
+  if (!userId) {
+    return NextResponse.json({ error: "user_id is required" }, { status: 400 });
+  }
 
   const endDate = endParam ? new Date(endParam) : new Date();
   const startDate = startParam ? new Date(startParam) : new Date(endDate.getTime() - 7 * 24 * 60 * 60 * 1000);
@@ -45,6 +50,7 @@ export async function GET(request: Request) {
     .select("created_at, category, total_tokens")
     .gte("created_at", startIso)
     .lte("created_at", endIso)
+    .eq("user_id", userId)
     .order("created_at", { ascending: true });
 
   const { data: usageRows, error: usageError } = await usageQuery;
@@ -83,13 +89,11 @@ export async function GET(request: Request) {
     .from("lead_jobs")
     .select("id, status, total, processed, created_at, updated_at, user_id, metadata")
     .order("created_at", { ascending: false })
-    .limit(100);
+    .limit(100)
+    .eq("user_id", userId);
 
   if (statusParam) {
     jobQuery = jobQuery.eq("status", statusParam);
-  }
-  if (userIdParam) {
-    jobQuery = jobQuery.eq("user_id", userIdParam);
   }
 
   const { data: jobRows, error: jobError } = await jobQuery;

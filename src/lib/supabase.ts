@@ -67,6 +67,7 @@ export type TokenUsageEntry = {
   completion_tokens: number;
   total_tokens: number;
   batch_id?: string | null;
+  user_id?: string | null;
 };
 
 export async function logTokenUsage(entries: TokenUsageEntry[]): Promise<void> {
@@ -88,6 +89,7 @@ export async function logTokenUsage(entries: TokenUsageEntry[]): Promise<void> {
     completion_tokens: entry.completion_tokens,
     total_tokens: entry.total_tokens,
     batch_id: entry.batch_id ?? null,
+    user_id: entry.user_id ?? null,
     created_at: new Date().toISOString()
   }));
 

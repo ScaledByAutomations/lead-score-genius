@@ -9,10 +9,11 @@ import type {
   LeadScoreResponse,
   TokenUsageSummary
 } from "@/lib/types";
-import { ThemeToggle } from "@/components/ThemeToggle";
+import { DashboardNav } from "@/components/DashboardNav";
 import { getSupabaseBrowserClient } from "@/lib/supabaseBrowser";
 
 const ACTIVE_JOB_STORAGE_KEY = "lead-score-genius-active-job-id";
+const ACTIVE_JOB_OPTIONS_KEY = "lead-score-genius-active-job-options";
 
 type ParsedLead = Record<string, string>;
 
@@ -29,10 +30,12 @@ type JobSnapshot = {
   supabase: LeadScoreApiResponse["supabase"];
   usage?: TokenUsageSummary | null;
   results: LeadScoreApiResponse["leads"];
+  options: {
+    useCleaner: boolean;
+    saveToSupabase: boolean;
+    maxConcurrency?: number | null;
+  };
 };
-
-const asyncThresholdFromEnv = Number(process.env.NEXT_PUBLIC_ASYNC_JOB_THRESHOLD);
-const ASYNC_JOB_THRESHOLD = Number.isFinite(asyncThresholdFromEnv) ? asyncThresholdFromEnv : 150;
 
 const FIELD_ALIASES = {
   id: ["id", "lead_id", "record_id", "crm_id"],
@@ -341,24 +344,104 @@ export default function DashboardPage() {
   }, [supabaseStatus, autoSaveToSupabase]);
 
   useEffect(() => {
-    if (!authChecked) {
+    if (!authChecked || jobId) {
       return;
     }
 
-    if (jobId) {
-      return;
-    }
+    let cancelled = false;
 
-    if (typeof window === "undefined") {
-      return;
-    }
+    const restoreJob = async () => {
+      if (typeof window !== "undefined") {
+        const storedJobId = window.localStorage.getItem(ACTIVE_JOB_STORAGE_KEY);
+        if (storedJobId) {
+          setJobId(storedJobId);
+          setProcessing(true);
+          const storedOptions = window.localStorage.getItem(ACTIVE_JOB_OPTIONS_KEY);
+          if (storedOptions) {
+            try {
+              const parsed = JSON.parse(storedOptions) as { saveToSupabase?: boolean };
+              if (typeof parsed.saveToSupabase === "boolean") {
+                setAutoSaveToSupabase(parsed.saveToSupabase);
+                setSaveState(parsed.saveToSupabase ? "saving" : "idle");
+                setSaveError(null);
+              }
+            } catch {
+              window.localStorage.removeItem(ACTIVE_JOB_OPTIONS_KEY);
+            }
+          }
+          return;
+        }
+      }
 
-    const storedJobId = window.localStorage.getItem(ACTIVE_JOB_STORAGE_KEY);
-    if (storedJobId) {
-      setJobId(storedJobId);
-      setProcessing(true);
-    }
-  }, [authChecked, jobId]);
+      if (!currentUserId) {
+        return;
+      }
+
+      try {
+        const response = await fetch(`/api/score-leads/jobs/active?user_id=${encodeURIComponent(currentUserId)}`);
+        if (!response.ok) {
+          const payload = await response.json().catch(() => ({}));
+          throw new Error(payload?.error ?? "Failed to restore job state.");
+        }
+
+        const data = (await response.json()) as { job: JobSnapshot | null };
+        if (cancelled || !data.job) {
+          return;
+        }
+
+        const isFinal = data.job.status === "completed" || data.job.status === "failed";
+
+        setActiveJob(data.job);
+        setScoredLeads(data.job.results ?? []);
+        setTokenUsage(data.job.usage ?? EMPTY_USAGE);
+        setAutoSaveToSupabase(data.job.options.saveToSupabase);
+
+        if (data.job.supabase?.requested) {
+          if (data.job.supabase.saved) {
+            setSaveState("saved");
+            setSaveError(null);
+          } else {
+            setSaveState("error");
+            setSaveError(data.job.supabase.error ?? "Failed to save to Supabase.");
+          }
+        } else {
+          setSaveState(data.job.options.saveToSupabase ? "saving" : "idle");
+          setSaveError(null);
+        }
+
+        if (isFinal) {
+          setProcessing(false);
+          if (data.job.status === "failed") {
+            setError(data.job.error ?? "Lead scoring job failed.");
+          }
+          if (typeof window !== "undefined") {
+            window.localStorage.removeItem(ACTIVE_JOB_STORAGE_KEY);
+            window.localStorage.removeItem(ACTIVE_JOB_OPTIONS_KEY);
+          }
+        } else {
+          setProcessing(true);
+          setJobId(data.job.id);
+          if (typeof window !== "undefined") {
+            window.localStorage.setItem(ACTIVE_JOB_STORAGE_KEY, data.job.id);
+            window.localStorage.setItem(
+              ACTIVE_JOB_OPTIONS_KEY,
+              JSON.stringify({ saveToSupabase: data.job.options.saveToSupabase })
+            );
+          }
+        }
+      } catch (restoreError) {
+        if (!cancelled) {
+          console.error("Failed to restore active job", restoreError);
+        }
+      }
+    };
+
+    void restoreJob();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [authChecked, jobId, currentUserId]);
 
   const handleSignOut = useCallback(async () => {
     await supabase.auth.signOut();
@@ -366,6 +449,10 @@ export default function DashboardPage() {
     setCurrentUserEmail(null);
     setCurrentUserId(null);
     setAutoSaveToSupabase(false);
+    if (typeof window !== "undefined") {
+      window.localStorage.removeItem(ACTIVE_JOB_STORAGE_KEY);
+      window.localStorage.removeItem(ACTIVE_JOB_OPTIONS_KEY);
+    }
     router.replace("/");
   }, [router, supabase]);
 
@@ -516,22 +603,20 @@ export default function DashboardPage() {
       return;
     }
 
+    const willAutoSave = autoSaveToSupabase && supabaseStatus === "connected";
+
     setProcessing(true);
     setError(null);
     setActiveJob(null);
     setJobId(null);
+    setScoredLeads([]);
     setTokenUsage(EMPTY_USAGE);
     if (typeof window !== "undefined") {
       window.localStorage.removeItem(ACTIVE_JOB_STORAGE_KEY);
+      window.localStorage.removeItem(ACTIVE_JOB_OPTIONS_KEY);
     }
-    const willAutoSave = autoSaveToSupabase && supabaseStatus === "connected";
-    if (willAutoSave) {
-      setSaveState("saving");
-      setSaveError(null);
-    } else {
-      setSaveState("idle");
-      setSaveError(null);
-    }
+    setSaveState(willAutoSave ? "saving" : "idle");
+    setSaveError(null);
 
     const payload = {
       leads: pendingLeads,
@@ -542,37 +627,8 @@ export default function DashboardPage() {
       user_id: currentUserId ?? undefined
     };
 
-    const useAsyncJob = pendingLeads.length >= ASYNC_JOB_THRESHOLD;
-
     try {
-      if (useAsyncJob) {
-        const response = await fetch("/api/score-leads/enqueue", {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json"
-          },
-          body: JSON.stringify(payload)
-        });
-
-        if (!response.ok) {
-          const message = await response.json().catch(() => ({}));
-          throw new Error(message?.error ?? "Failed to enqueue scoring job.");
-        }
-
-        const data = (await response.json()) as { job: JobSnapshot };
-        setJobId(data.job.id);
-        setActiveJob(data.job);
-        setScoredLeads(data.job.results ?? []);
-        setTokenUsage(data.job.usage ?? EMPTY_USAGE);
-        setTokenUsage(data.job.usage ?? EMPTY_USAGE);
-        setTokenUsage(data.job.usage ?? EMPTY_USAGE);
-        if (typeof window !== "undefined") {
-          window.localStorage.setItem(ACTIVE_JOB_STORAGE_KEY, data.job.id);
-        }
-        return;
-      }
-
-      const response = await fetch("/api/score-leads", {
+      const response = await fetch("/api/score-leads/enqueue", {
         method: "POST",
         headers: {
           "Content-Type": "application/json"
@@ -582,26 +638,47 @@ export default function DashboardPage() {
 
       if (!response.ok) {
         const message = await response.json().catch(() => ({}));
-        throw new Error(message?.error ?? "Failed to score leads.");
+        throw new Error(message?.error ?? "Failed to enqueue scoring job.");
       }
 
-      const json = (await response.json()) as LeadScoreApiResponse;
+      const data = (await response.json()) as { job: JobSnapshot };
 
-      setScoredLeads(json.leads);
-      setTokenUsage(json.usage ?? EMPTY_USAGE);
-      setActiveJob(null);
-      setJobId(null);
-      if (json.supabase?.requested) {
-        if (json.supabase.saved) {
+      setActiveJob(data.job);
+      setScoredLeads(data.job.results ?? []);
+      setTokenUsage(data.job.usage ?? EMPTY_USAGE);
+      setAutoSaveToSupabase(data.job.options.saveToSupabase);
+
+      if (data.job.supabase?.requested) {
+        if (data.job.supabase.saved) {
           setSaveState("saved");
           setSaveError(null);
         } else {
           setSaveState("error");
-          setSaveError(json.supabase.error ?? "Failed to save to Supabase.");
+          setSaveError(data.job.supabase.error ?? "Failed to save to Supabase.");
         }
-      } else if (!willAutoSave) {
-        setSaveState("idle");
-        setSaveError(null);
+      }
+
+      const isFinal = data.job.status === "completed" || data.job.status === "failed";
+
+      if (isFinal) {
+        setProcessing(false);
+        setJobId(null);
+        if (data.job.status === "failed") {
+          setError(data.job.error ?? "Lead scoring job failed.");
+        }
+        if (typeof window !== "undefined") {
+          window.localStorage.removeItem(ACTIVE_JOB_STORAGE_KEY);
+          window.localStorage.removeItem(ACTIVE_JOB_OPTIONS_KEY);
+        }
+      } else {
+        setJobId(data.job.id);
+        if (typeof window !== "undefined") {
+          window.localStorage.setItem(ACTIVE_JOB_STORAGE_KEY, data.job.id);
+          window.localStorage.setItem(
+            ACTIVE_JOB_OPTIONS_KEY,
+            JSON.stringify({ saveToSupabase: data.job.options.saveToSupabase })
+          );
+        }
       }
     } catch (scoreError) {
       setError(scoreError instanceof Error ? scoreError.message : "Failed to score leads.");
@@ -611,13 +688,14 @@ export default function DashboardPage() {
         setSaveError("Scoring failed before Supabase save could complete.");
       } else {
         setSaveState("idle");
+        setSaveError(null);
       }
       setProcessing(false);
       setActiveJob(null);
       setJobId(null);
-    } finally {
-      if (!useAsyncJob) {
-        setProcessing(false);
+      if (typeof window !== "undefined") {
+        window.localStorage.removeItem(ACTIVE_JOB_STORAGE_KEY);
+        window.localStorage.removeItem(ACTIVE_JOB_OPTIONS_KEY);
       }
     }
   }, [pendingLeads, useCleaner, autoSaveToSupabase, supabaseStatus, currentUserId]);
@@ -648,6 +726,7 @@ export default function DashboardPage() {
         setError(data.job.error ?? "Lead scoring run cancelled.");
         if (typeof window !== "undefined") {
           window.localStorage.removeItem(ACTIVE_JOB_STORAGE_KEY);
+          window.localStorage.removeItem(ACTIVE_JOB_OPTIONS_KEY);
         }
 
         if (data.job.supabase?.requested) {
@@ -759,15 +838,21 @@ export default function DashboardPage() {
 
         setActiveJob(data.job);
         setScoredLeads(data.job.results ?? []);
+        setAutoSaveToSupabase(data.job.options.saveToSupabase);
 
         if (data.job.status === "completed" || data.job.status === "failed") {
           if (typeof window !== "undefined") {
             window.localStorage.removeItem(ACTIVE_JOB_STORAGE_KEY);
+            window.localStorage.removeItem(ACTIVE_JOB_OPTIONS_KEY);
           }
         } else {
           setProcessing(true);
           if (typeof window !== "undefined") {
             window.localStorage.setItem(ACTIVE_JOB_STORAGE_KEY, data.job.id);
+            window.localStorage.setItem(
+              ACTIVE_JOB_OPTIONS_KEY,
+              JSON.stringify({ saveToSupabase: data.job.options.saveToSupabase })
+            );
           }
         }
 
@@ -786,6 +871,7 @@ export default function DashboardPage() {
           setJobId(null);
           if (typeof window !== "undefined") {
             window.localStorage.removeItem(ACTIVE_JOB_STORAGE_KEY);
+            window.localStorage.removeItem(ACTIVE_JOB_OPTIONS_KEY);
           }
         } else if (data.job.status === "failed") {
           setProcessing(false);
@@ -797,6 +883,7 @@ export default function DashboardPage() {
           }
           if (typeof window !== "undefined") {
             window.localStorage.removeItem(ACTIVE_JOB_STORAGE_KEY);
+            window.localStorage.removeItem(ACTIVE_JOB_OPTIONS_KEY);
           }
         }
       } catch (pollError) {
@@ -811,6 +898,7 @@ export default function DashboardPage() {
         setTokenUsage(EMPTY_USAGE);
         if (typeof window !== "undefined") {
           window.localStorage.removeItem(ACTIVE_JOB_STORAGE_KEY);
+          window.localStorage.removeItem(ACTIVE_JOB_OPTIONS_KEY);
         }
       }
     };
@@ -847,7 +935,7 @@ export default function DashboardPage() {
               </p>
             </div>
             <div className="flex flex-col items-start gap-2 sm:items-end">
-              <div className="flex flex-wrap items-center gap-2">
+              <DashboardNav onSignOut={handleSignOut}>
                 <span
                   className={`inline-flex items-center gap-2 rounded-full px-3 py-1 text-xs font-medium ${statusBadgeClass}`}
                 >
@@ -857,33 +945,7 @@ export default function DashboardPage() {
                 {currentUserEmail ? (
                   <span className="text-xs text-[var(--muted)]">Signed in as {currentUserEmail}</span>
                 ) : null}
-                <ThemeToggle />
-                <a
-                  href="/dashboard/saved"
-                  className="rounded-md border border-[var(--border)] bg-[var(--surface)] px-3 py-1 text-xs font-medium text-[var(--foreground)] shadow-sm transition hover:border-[var(--accent)] hover:bg-[var(--surface-subtle)]"
-                >
-                  Saved leads
-                </a>
-                <a
-                  href="/dashboard/usage"
-                  className="rounded-md border border-[var(--border)] bg-[var(--surface)] px-3 py-1 text-xs font-medium text-[var(--foreground)] shadow-sm transition hover:border-[var(--accent)] hover:bg-[var(--surface-subtle)]"
-                >
-                  Token usage
-                </a>
-                <a
-                  href="/dashboard/account"
-                  className="rounded-md border border-[var(--border)] bg-[var(--surface)] px-3 py-1 text-xs font-medium text-[var(--foreground)] shadow-sm transition hover:border-[var(--accent)] hover:bg-[var(--surface-subtle)]"
-                >
-                  Account settings
-                </a>
-                <button
-                  type="button"
-                  onClick={handleSignOut}
-                  className="rounded-md border border-[var(--border)] bg-[var(--surface)] px-3 py-1 text-xs font-medium text-[var(--foreground)] shadow-sm transition hover:border-[var(--accent)] hover:bg-[var(--surface-subtle)]"
-                >
-                  Sign out
-                </button>
-              </div>
+              </DashboardNav>
               {supabaseStatus === "connected" ? (
                 <label className="flex cursor-pointer items-center gap-2 text-xs text-[var(--muted)]">
                   <input

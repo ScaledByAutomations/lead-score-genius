@@ -3,7 +3,7 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
 
-import { ThemeToggle } from "@/components/ThemeToggle";
+import { DashboardNav } from "@/components/DashboardNav";
 import { getSupabaseBrowserClient } from "@/lib/supabaseBrowser";
 
 type LeadRun = {
@@ -19,6 +19,8 @@ type LeadRun = {
 };
 
 const INTERPRETATION_OPTIONS = ["All", "Hot", "Qualified", "Borderline", "Cold Dead"] as const;
+const ACTIVE_JOB_STORAGE_KEY = "lead-score-genius-active-job-id";
+const ACTIVE_JOB_OPTIONS_KEY = "lead-score-genius-active-job-options";
 
 export default function SavedLeadsPage() {
   const router = useRouter();
@@ -144,6 +146,18 @@ export default function SavedLeadsPage() {
     });
   }, [industryFilter, interpretationFilter, leadRuns, maxScore, minScore, searchTerm]);
 
+  const handleSignOut = useCallback(async () => {
+    await supabase.auth.signOut();
+    setAuthChecked(false);
+    setCurrentEmail(null);
+    setCurrentUserId(null);
+    if (typeof window !== "undefined") {
+      window.localStorage.removeItem(ACTIVE_JOB_STORAGE_KEY);
+      window.localStorage.removeItem(ACTIVE_JOB_OPTIONS_KEY);
+    }
+    router.replace("/");
+  }, [router, supabase]);
+
   if (!authChecked) {
     return (
       <div className="flex min-h-screen items-center justify-center bg-[var(--background)] text-[var(--foreground)] transition-colors">
@@ -157,11 +171,17 @@ export default function SavedLeadsPage() {
 
   return (
     <div className="min-h-screen bg-[var(--background)] text-[var(--foreground)] transition-colors">
-      <div className="absolute right-6 top-6">
-        <ThemeToggle />
-      </div>
       <main className="mx-auto flex max-w-6xl flex-col gap-8 px-6 py-10">
-        <header className="space-y-2">
+        <header className="space-y-4">
+          <div className="flex justify-end">
+            <DashboardNav onSignOut={handleSignOut}>
+              {currentEmail ? (
+                <span className="rounded-full border border-[var(--border)] bg-[var(--surface)] px-3 py-1 text-xs text-[var(--muted)]">
+                  Signed in as {currentEmail}
+                </span>
+              ) : null}
+            </DashboardNav>
+          </div>
           <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
             <div>
               <h1 className="text-3xl font-semibold">Saved lead runs</h1>
@@ -170,15 +190,6 @@ export default function SavedLeadsPage() {
               </p>
             </div>
             <div className="flex flex-wrap gap-2 text-xs text-[var(--muted)]">
-              <span className="rounded-full border border-[var(--border)] bg-[var(--surface)] px-3 py-1">
-                Signed in as {currentEmail}
-              </span>
-              <a
-                href="/dashboard"
-                className={`rounded-md border px-3 py-1 text-[var(--foreground)] ${secondaryButton}`}
-              >
-                Back to scoring
-              </a>
               <button
                 type="button"
                 onClick={fetchLeadRuns}

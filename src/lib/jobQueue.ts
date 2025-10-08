@@ -121,6 +121,11 @@ export type JobSnapshot = {
   supabase: LeadScoreApiResponse["supabase"];
   usage: TokenUsageSummary | null;
   results: LeadScoreApiResponse["leads"];
+  options: {
+    useCleaner: boolean;
+    saveToSupabase: boolean;
+    maxConcurrency?: number | null;
+  };
 };
 
 function mapStatus(status: string): JobStatus {
@@ -146,6 +151,11 @@ function toSnapshot(job: LeadJobRow, items: LeadJobItemRow[]): JobSnapshot {
 
   const supabaseResult = (job.metadata?.supabase ?? null) as JobSnapshot["supabase"];
   const usage = job.metadata?.usage ?? null;
+  const options = {
+    useCleaner: job.metadata?.options?.useCleaner ?? true,
+    saveToSupabase: job.metadata?.options?.saveToSupabase ?? false,
+    maxConcurrency: job.metadata?.options?.maxConcurrency ?? null
+  };
 
   return {
     id: job.id,
@@ -157,7 +167,8 @@ function toSnapshot(job: LeadJobRow, items: LeadJobItemRow[]): JobSnapshot {
     error: job.error ?? undefined,
     supabase: supabaseResult,
     usage,
-    results
+    results,
+    options
   };
 }
 
@@ -531,4 +542,36 @@ export async function cancelJob(jobId: string, reason?: string): Promise<JobSnap
 
   const payload = await loadJob(client, jobId);
   return payload ? toSnapshot(payload.job, payload.items) : null;
+}
+
+export async function findActiveJobForUser(userId: string): Promise<JobSnapshot | null> {
+  if (!userId) {
+    return null;
+  }
+
+  const client = getSupabaseAdminClient();
+  if (!client) {
+    console.error("Supabase client not configured; cannot look up active job", { userId });
+    return null;
+  }
+
+  const { data: rows, error } = await client
+    .from("lead_jobs")
+    .select("id")
+    .eq("user_id", userId)
+    .in("status", ["queued", "processing"])
+    .order("created_at", { ascending: false })
+    .limit(1);
+
+  if (error) {
+    console.error("Failed to look up active job for user", { userId }, error);
+    return null;
+  }
+
+  const activeId = rows?.[0]?.id;
+  if (!activeId) {
+    return null;
+  }
+
+  return getJob(activeId);
 }
